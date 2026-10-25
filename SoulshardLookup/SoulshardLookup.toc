@@ -1,0 +1,31 @@
+## Interface: 20506
+## Title: Soulshard Lookup
+## IconTexture: Interface\AddOns\SoulshardLookup\Media\Soulshard.tga
+## Notes: Nearby inspection, saved TBC profiles and native LFG annotations
+## Version: 0.4.0
+## SavedVariables: ArmoryLookupPreferences
+Core.lua
+Codec.lua
+Data/Load.xml
+Identity.lua
+DataStore.lua
+Packed.lua
+Sections.lua
+GearAudit.lua
+Catalogs/Tbc.lua
+Catalogs/Raids.lua
+LiveInspection.lua
+UI/Theme.lua
+UI/Portraits.lua
+UI/Motion.lua
+UI/Equipment.lua
+UI/Talents.lua
+UI/Raids.lua
+UI/Overview.lua
+UI/Search.lua
+UI/Profile.lua
+WhisperProfiles.lua
+Whispers.lua
+UI/Whispers.lua
+Integrations/TbcLfg.lua
+Integrations/Players.lua

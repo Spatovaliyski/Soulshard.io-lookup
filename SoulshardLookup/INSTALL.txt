@@ -1,0 +1,25 @@
+Soulshard Lookup — TBC Anniversary (interface 20506)
+
+INSTALL OR UPDATE
+1. Download SoulshardLookup.zip from https://github.com/Spatovaliyski/Soulshard.io-lookup/releases/latest.
+2. Exit World of Warcraft completely.
+3. Back up your existing addon folder and account SavedVariables before changing them.
+4. Replace the complete SoulshardLookup folder under Interface/AddOns with the release folder. SoulshardLookup.toc must be directly inside Interface/AddOns/SoulshardLookup. Do not merge releases or Data folders.
+5. Disable or remove the old ArmoryLookup and obsolete ArmoryLookupData addons. Keep backups outside Interface/AddOns so only Soulshard Lookup loads.
+6. Restart WoW, enable Soulshard Lookup, and use /sl or /lookup. Use /sl status for archive details and /sl settings for the Whisper Collector. /al and /armorylookup remain aliases.
+
+PRESERVE SETTINGS WHEN MOVING FROM ARMORYLOOKUP
+While WoW is closed, back up WTF/Account/<account>/SavedVariables/ArmoryLookup.lua. If SoulshardLookup.lua does not already exist in that directory, copy ArmoryLookup.lua to SoulshardLookup.lua. Do this for each account you use. Do not overwrite existing SoulshardLookup.lua settings. The internal ArmoryLookupPreferences key is retained, so no edits inside the copied file are needed. Without this copy, the renamed addon starts with default window placement and animation preferences. The original settings file stays untouched.
+
+ROLL BACK
+Exit WoW. Back up the current addon folder and account settings, then replace the complete SoulshardLookup folder with your previous release and restore its backed-up settings if needed. Never mix a previous release's code with another release's Data folder. When returning to ArmoryLookup, disable/remove SoulshardLookup and restore the complete old addon and its original ArmoryLookup.lua settings. Enable only one addon.
+
+SAVED PROFILE DATA
+Published release ZIPs contain matching addon code, catalogs, artwork and one complete snapshot of saved website profiles. Daily builds update the saved snapshot; each character section retains its actual collection date. An older installed release keeps its own code and data until you replace the whole addon folder with a newer release.
+
+The source repository contains empty Data stubs for development. Download a complete published release for saved character data. Coverage is saved profiles only, not a complete realm census. Addon 0.4.0 reads data formats 1 and 2 with compatible catalogs. Data/Load.xml is loaded by the TOC; no manual TOC edits are needed.
+
+NEARBY LIVE DATA
+Nearby equipment, GearScore and talents use live inspection, including profiles opened through saved search. Missing live data shows inspection feedback rather than an older saved value. Saved equipment and talents are used outside inspect distance; saved raid progression remains available nearby. Nearby party/raid members preload while idle. Recent live data is reused for ten seconds, then refreshed. Actual response time depends on WoW and other inspection addons. Live inspection data stays in memory for this session and never changes your installed Data folder.
+
+Website: https://soulshard.io

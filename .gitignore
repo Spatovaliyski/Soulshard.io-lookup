@@ -1,0 +1,8 @@
+.DS_Store
+Thumbs.db
+*.log
+.env
+.env.*
+/SoulshardLookup/Data/*
+!/SoulshardLookup/Data/Pack.lua
+!/SoulshardLookup/Data/Load.xml
