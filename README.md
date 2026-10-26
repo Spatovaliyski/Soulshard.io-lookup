@@ -1,21 +1,26 @@
 # Soulshard Lookup
 
-WoW TBC Anniversary addon for interface **20506**. This repository contains the installable addon source and its artwork and catalogs.
+WoW TBC Anniversary addon for interface **20506**. This repository contains the
+public installable source, artwork, catalogs and complete downloadable releases.
 
 ## Install
 
-Download `SoulshardLookup.zip` from the [latest release](https://github.com/Spatovaliyski/Soulshard.io-lookup/releases/latest). Exit WoW, back up the current addon folder and account settings, then replace the complete `SoulshardLookup` folder under `Interface/AddOns`. Do not merge releases or datasets.
+Download `SoulshardLookup.zip` from the [latest release](https://github.com/Spatovaliyski/Soulshard.io-lookup/releases/latest).
+Exit WoW, back up your addon folder and account settings, then replace the complete
+`SoulshardLookup` folder under `Interface/AddOns`. Do not mix code or datasets from different releases.
 
-Published releases contain matching addon code and a saved-profile snapshot from [Soulshard](https://soulshard.io). Daily data builds retain each character's actual collection date. Nearby equipment and talents use live inspection. Use `/sl` or `/lookup` for profiles and `/sl settings` for the Whisper Collector.
+Packages include matching addon code and a saved-profile snapshot from [Soulshard](https://soulshard.io).
+Actual profile collection dates remain visible. Nearby equipment and talents use live inspection.
+Use `/sl` or `/lookup` for profiles and `/sl settings` for the Whisper Collector.
+See [installation and rollback](SoulshardLookup/INSTALL.txt) and [notices](SoulshardLookup/NOTICE.txt).
 
-See [installation and rollback](SoulshardLookup/INSTALL.txt) and the bundled [artwork and catalog notices](SoulshardLookup/NOTICE.txt).
+## Release versions
 
-## Addon development
+Official versions use `v1.0.1`. Automatic data updates use the same official addon
+code plus the export date, such as `v1.0.1-20261028`. A new official version becomes
+the base for later automatic releases. Published packages remain fixed.
 
-Edit `SoulshardLookup/` and merge release-ready changes into `main`. The source checkout contains empty data stubs; use a complete published release for saved character data.
-
-For a code release, keep the numeric version in `Core.lua` and `SoulshardLookup.toc` consistent, then push the matching `vX.Y.Z` tag, such as `v0.5.0`. The small tag workflow requests a release from the private publishing service. Daily packages use current `main` and the latest completed website data export. Packaging, tests and previews are maintained with the private website backend.
-
-Tag requests stay disabled until the repository variable `RELEASES_ENABLED` is `true` and the `BUILDER_DISPATCH_TOKEN` Actions secret is configured. That credential must have Actions write access only to the publishing repository. Daily GitHub packages can run before CurseForge setup; CurseForge uploads are enabled separately in the private publishing service.
-
-Native WoW compatibility and representative dataset load checks remain part of release validation. Automated checks do not certify in-game behavior.
+This repository is maintained automatically from the private authoring workspace.
+Only tagged installable addon snapshots are mirrored here; private website and
+build tooling stay private. Source checkouts contain empty data stubs; use a full
+published ZIP for saved character data. This repository does not trigger release jobs.
