@@ -28,7 +28,7 @@ jobs:
             throw new Error('Configure the BUILDER_DISPATCH_TOKEN Actions secret before enabling release requests.');
 
           const response = await fetch(
-            'https://api.github.com/repos/Spatovaliyski/Soulshard-Lookup/actions/workflows/release.yml/dispatches',
+            'https://api.github.com/repos/Spatovaliyski/armory/actions/workflows/addon-release.yml/dispatches',
             {
               method: 'POST',
               headers: {

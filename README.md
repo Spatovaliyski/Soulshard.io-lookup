@@ -14,8 +14,8 @@ See [installation and rollback](SoulshardLookup/INSTALL.txt) and the bundled [ar
 
 Edit `SoulshardLookup/` and merge release-ready changes into `main`. The source checkout contains empty data stubs; use a complete published release for saved character data.
 
-For a code release, keep the numeric version in `Core.lua` and `SoulshardLookup.toc` consistent, then push the matching `vX.Y.Z` tag, such as `v0.5.0`. The small tag workflow requests a release from the publishing service. Daily packages use current `main` and new saved data. Packaging and development tooling are maintained separately.
+For a code release, keep the numeric version in `Core.lua` and `SoulshardLookup.toc` consistent, then push the matching `vX.Y.Z` tag, such as `v0.5.0`. The small tag workflow requests a release from the private publishing service. Daily packages use current `main` and new saved data. Packaging, tests and previews are maintained with the private website backend.
 
-Tag requests stay disabled until the repository variable `RELEASES_ENABLED` is `true` and the `BUILDER_DISPATCH_TOKEN` Actions secret is configured. That credential must have Actions write access only to the publishing repository. CurseForge upload credentials stay with the publishing service.
+Tag requests stay disabled until the repository variable `RELEASES_ENABLED` is `true` and the `BUILDER_DISPATCH_TOKEN` Actions secret is configured. That credential must have Actions write access only to the publishing repository. Daily GitHub packages can run before CurseForge setup; CurseForge uploads are enabled separately in the private publishing service.
 
-Native WoW compatibility and representative dataset load checks are required before enabling public releases.
+Native WoW compatibility and representative dataset load checks remain part of release validation. Automated checks do not certify in-game behavior.
