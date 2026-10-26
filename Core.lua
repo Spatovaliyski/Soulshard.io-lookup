@@ -1,5 +1,5 @@
 local _, A = ...
-A.version = "0.4.0"
+A.version = "0.4.1"
 A.interface = 20506
 A.staleAfter = 86400
 A.state = "No saved data installed. Install an exported Data folder and restart WoW."
