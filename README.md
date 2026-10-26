@@ -12,7 +12,7 @@ Exit WoW, back up your addon folder and account settings, then replace the compl
 Packages include matching addon code and a saved-profile snapshot from [Soulshard](https://soulshard.io).
 Actual profile collection dates remain visible. Nearby equipment and talents use live inspection.
 Use `/sl` or `/lookup` for profiles and `/sl settings` for the Whisper Collector.
-See [installation and rollback](SoulshardLookup/INSTALL.txt) and [notices](SoulshardLookup/NOTICE.txt).
+See [installation and rollback](INSTALL.txt) and [notices](NOTICE.txt).
 
 ## Release versions
 

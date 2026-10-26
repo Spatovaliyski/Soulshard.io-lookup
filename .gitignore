@@ -3,6 +3,6 @@ Thumbs.db
 *.log
 .env
 .env.*
-/SoulshardLookup/Data/*
-!/SoulshardLookup/Data/Pack.lua
-!/SoulshardLookup/Data/Load.xml
+/Data/*
+!/Data/Pack.lua
+!/Data/Load.xml
