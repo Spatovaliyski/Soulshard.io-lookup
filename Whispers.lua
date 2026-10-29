@@ -5,8 +5,15 @@ A.Whispers = W
 local LIMIT, TTL, PREVIEW_LIMIT, DELIVERY_LIMIT = 500, 86400, 512, 512
 local records, guidKeys, selected, deliveries, deliveryOrder = {}, {}, {}, {}, {}
 local settings, saved, ownerKey, callback, eventFrame
+-- WhisperSync shares the roster inside a group. `syncRole` is "authority" for the group leader or a raid assistant and
+-- "viewer" for any other member; it is nil outside a group and while collection is unavailable. Rows shared by others are
+-- marked `remote`: they carry no whisper text, are never saved, and leave with the group.
+local syncRole, syncListener, syncListing
 local initialized, incompatible, worldReady = false, false, true
 local confirmedPresence, seenListing = nil, false
+-- `settled` becomes true at the first PLAYER_ENTERING_WORLD, when group state can be trusted. `disbanded` records
+-- that the player was seen outside any group since the roster was last started, so the next listing begins afresh.
+local settled, disbanded = false, false
 local generation, overflowCount, restrictedCount = 1, 0, 0
 local context = { epoch = 1, activityIDs = {}, contextState = "unknown" }
 local status = { state = "listing-state-unavailable", label = "Paused — checking listing" }
@@ -75,6 +82,10 @@ local function notify()
     if callback then callback() end
 end
 
+local function emit(event, ...)
+    if syncListener then pcall(syncListener, event, ...) end
+end
+
 local function setStatus(state, label, reason)
     local changed = status.state ~= state or status.reason ~= reason
     status = { state = state, label = label, reason = reason, overflowCount = overflowCount, restrictedCount = restrictedCount }
@@ -137,13 +148,15 @@ local function save()
     if settings.retention == "session" then saved.collections[ownerKey] = nil; return end
     local rows = {}
     for _, record in pairs(records) do
-        rows[#rows + 1] = {
-            identity = identityCopy(record.identity), firstSeenAt = record.firstSeenAt,
-            lastSeenAt = record.lastSeenAt, count = record.count,
-            firstListingEpoch = record.firstListingEpoch, lastListingEpoch = record.lastListingEpoch,
-            observedClassToken = record.observedClassToken, observedLevel = record.observedLevel,
-            observedRace = record.observedRace, observedSex = record.observedSex,
-        }
+        if not record.remote then
+            rows[#rows + 1] = {
+                identity = identityCopy(record.identity), firstSeenAt = record.firstSeenAt,
+                lastSeenAt = record.lastSeenAt, count = record.count,
+                firstListingEpoch = record.firstListingEpoch, lastListingEpoch = record.lastListingEpoch,
+                observedClassToken = record.observedClassToken, observedLevel = record.observedLevel,
+                observedRace = record.observedRace, observedSex = record.observedSex,
+            }
+        end
     end
     saved.collections[ownerKey] = { schemaVersion = 1, rows = rows, epoch = context.epoch, signature = context.signature }
 end
@@ -233,9 +246,99 @@ local function readContext(entry)
     return result, #result > 0 and "known" or "unknown"
 end
 
+-- A fresh roster for a new raid or a new group. Settings, the delivery filter and the listing epoch are kept.
+-- `remote` is a reset another leader sent, which must not be sent back.
+local function resetRoster(automatic, remote)
+    if next(records) == nil then return false end
+    generation = generation + 1
+    records, guidKeys, selected = {}, {}, {}
+    overflowCount = 0
+    save()
+    if not remote then emit("reset", automatic == true) end
+    return true
+end
+
+-- Shared rows belong to the group that shared them.
+local function dropRemote()
+    local changed = false
+    for key, record in pairs(records) do
+        if record.remote then records[key], selected[key] = nil, nil; changed = true end
+    end
+    return changed
+end
+
+local function squash(value)
+    return (lower(value):gsub("[%s%-']", ""))
+end
+
+-- Lower-cased names (with the realm when the client reports one) of everyone in the home party or raid.
+local function groupMembers()
+    local members = {}
+    if type(IsInGroup) ~= "function" or type(UnitName) ~= "function" then return members end
+    local grouped = read(IsInGroup, LE_PARTY_CATEGORY_HOME)
+    if grouped ~= true then return members end
+    local raid = read(IsInRaid, LE_PARTY_CATEGORY_HOME) == true
+    -- The client leaves the realm empty for members on the player's own realm.
+    local own = read(GetRealmName)
+    own = (accessible(own) and type(own) == "string" and own ~= "") and squash(own) or ""
+    for index = 1, raid and 40 or 4 do
+        local ok, name, realm = pcall(UnitName, (raid and "raid" or "party") .. index)
+        if ok and accessible(name) and type(name) == "string" and name ~= "" then
+            local list = members[lower(name)] or {}
+            members[lower(name)] = list
+            list[#list + 1] = (accessible(realm) and type(realm) == "string" and realm ~= "") and squash(realm) or own
+        end
+    end
+    return members
+end
+
+local function isMember(members, identity)
+    local list = type(identity.name) == "string" and members[lower(identity.name)]
+    if not list then return false end
+    if not identity.realmName then return true end
+    local realm = squash(identity.realmName)
+    for _, other in ipairs(list) do
+        if other == "" or other == realm then return true end
+    end
+    return false
+end
+
+-- Players who joined the group are placed; they leave the roster.
+local function dropJoined()
+    local members = groupMembers()
+    if next(members) == nil then return false end
+    local changed = false
+    for key, record in pairs(records) do
+        if isMember(members, record.identity) then
+            records[key], selected[key] = nil, nil
+            if record.identity.guid and guidKeys[record.identity.guid] == key then guidKeys[record.identity.guid] = nil end
+            changed = true
+        end
+    end
+    if changed then save() end
+    return changed
+end
+
+-- The roster row for a player, even when a whisper filed it under a GUID before the realm was known.
+local function findRecord(identity)
+    local key = recordKey(identity)
+    if records[key] then return key, records[key] end
+    local name = lower(identity.name)
+    for otherKey, record in pairs(records) do
+        local other = record.identity
+        if lower(other.name) == name and (not other.realmSlug or not identity.realmSlug or other.realmSlug == identity.realmSlug) then
+            return otherKey, record
+        end
+    end
+    return key, nil
+end
+
 function W.RefreshState(quiet, leadershipChanged)
     if not initialized then return status end
     local changed
+    local wasRecording = status.state == "recording"
+    syncRole = nil
+    local rosterChanged = false
     local epochChanged = leadershipChanged == true
     if incompatible then changed = setStatus("storage-incompatible", "Paused — saved collection needs a compatible addon")
     elseif not settings.enabled then changed = setStatus("disabled", "Collector disabled")
@@ -253,27 +356,44 @@ function W.RefreshState(quiet, leadershipChanged)
             local raid, raidOK = read(IsInRaid, LE_PARTY_CATEGORY_HOME)
             local leader, leaderOK = read(UnitIsGroupLeader, "player", LE_PARTY_CATEGORY_HOME)
             local assistant, assistantOK = read(UnitIsGroupAssistant, "player")
-            if not groupedOK or not raidOK or not leaderOK or not assistantOK or type(grouped) ~= "boolean" or type(raid) ~= "boolean" or
-                type(leader) ~= "boolean" or type(assistant) ~= "boolean" then
+            local valid = groupedOK and raidOK and leaderOK and assistantOK and type(grouped) == "boolean" and type(raid) == "boolean" and
+                type(leader) == "boolean" and type(assistant) == "boolean"
+            if valid and grouped then syncRole = (leader or (raid and assistant)) and "authority" or "viewer" end
+            if not valid then
                 changed = setStatus("restricted-data", "Paused — group authority unavailable")
-            elseif not grouped then changed = setStatus("not-grouped", "Paused — party or raid leadership required")
-            elseif not leader and not (raid and assistant) then changed = setStatus("not-leader-or-assistant", "Paused — leader or raid assistant required")
+            elseif not grouped then
+                if settled then
+                    disbanded = true
+                    if dropRemote() then rosterChanged = true end
+                end
+                changed = setStatus("not-grouped", "Paused — party or raid leadership required")
+            elseif syncRole == "viewer" then
+                changed = setStatus("viewing", "Viewing — shared by your group's leaders")
             elseif type(C_LFGList) ~= "table" or type(C_LFGList.HasActiveEntryInfo) ~= "function" or type(C_LFGList.GetActiveEntryInfo) ~= "function" then
                 changed = setStatus("capability-unavailable", "Paused — active-listing API unavailable")
             else
                 local active, activeOK = read(C_LFGList.HasActiveEntryInfo)
+                -- An assistant may not own the listing: the leader's addon says when the group is listed and for which activities.
+                local relayed = activeOK and active == false and not leader and syncListing and syncListing() or nil
                 if not activeOK or type(active) ~= "boolean" then changed = setStatus("listing-state-unavailable", "Paused — listing state unavailable")
-                elseif not active then
+                elseif not active and not relayed then
                     confirmedPresence = "inactive"
                     changed = setStatus("not-listed", "Paused — group is not listed")
                 else
-                    local entry, entryOK = read(C_LFGList.GetActiveEntryInfo)
+                    local entry, entryOK = nil, true
+                    if active then entry, entryOK = read(C_LFGList.GetActiveEntryInfo) end
                     if not entryOK then changed = setStatus("restricted-data", "Paused — listing data restricted")
-                    elseif type(entry) ~= "table" then changed = setStatus("listing-state-unavailable", "Paused — listing state unavailable")
+                    elseif active and type(entry) ~= "table" then changed = setStatus("listing-state-unavailable", "Paused — listing state unavailable")
                     else
-                        local ids, contextState = readContext(entry)
+                        local ids, contextState
+                        if active then ids, contextState = readContext(entry)
+                        else ids, contextState = relayed, #relayed > 0 and "known" or "unknown" end
                         local signature = contextState == "known" and table.concat(ids, ",") or nil
-                        if (confirmedPresence == "inactive" and seenListing) or (signature and context.signature and signature ~= context.signature) then epochChanged = true end
+                        local raidChanged = signature ~= nil and context.signature ~= nil and signature ~= context.signature
+                        if (confirmedPresence == "inactive" and seenListing) or raidChanged then epochChanged = true end
+                        -- A different raid, or a new listing once the previous group disbanded, starts a fresh roster.
+                        if raidChanged or disbanded then rosterChanged = resetRoster(true) end
+                        disbanded = false
                         confirmedPresence, seenListing = "active", true
                         context.activityIDs, context.contextState = ids, contextState
                         if signature then context.signature = signature end
@@ -288,6 +408,8 @@ function W.RefreshState(quiet, leadershipChanged)
         save()
         changed = true
     end
+    if rosterChanged then changed = true end
+    if (status.state == "recording") ~= wasRecording then emit("state") end
     if changed and not quiet then notify() end
     return status
 end
@@ -363,6 +485,8 @@ function W.Receive(...)
     local identity = A.ResolveWhisperIdentity(author, guid)
     if not identity or not text(identity.name, 96) then return false end
     if accessible(lineID) and deliverySeen(lineID) then return false end
+    -- Someone already in the group is placed; their whispers are not applications.
+    if isMember(groupMembers(), identity) then return false end
     local timestamp = now()
     if not timestamp then return false end
     prune()
@@ -416,10 +540,104 @@ function W.Receive(...)
     record.count = math.min(record.count + 1, 1000000000)
     record.acceptedMessageCount = record.count
     record.lastMessage, record.restored = preview(message), false
+    -- A whisper this client received itself makes the row first-hand, even if another leader shared it first.
+    record.remote, record.reporter = nil, nil
     observeClass(record, guid)
+    save()
+    emit("upsert", record)
+    notify()
+    return true
+end
+
+-- A row another leader or assistant shared. The wire carries who whispered, never what they said, so the row has no
+-- preview. Its ages are measured from now: clocks differ between players and only the receiver's clock is trusted.
+function W.MergeRemote(entry, reporter)
+    if not initialized or not syncRole or type(entry) ~= "table" or type(A.ResolveWhisperIdentity) ~= "function" then return false end
+    local name, realm = entry.name, entry.realm
+    if not text(name, 96) or (realm ~= nil and not text(realm, 120)) or not text(reporter, 240) then return false end
+    local count, lastAge, firstAge = entry.count, entry.lastAge, entry.firstAge
+    if not integer(count, 1, 1000000000) or not integer(lastAge, 0, TTL - 1) or not integer(firstAge, lastAge, TTL - 1) then return false end
+    local identity = A.ResolveWhisperIdentity(realm and (name .. "-" .. realm) or name, nil)
+    if not identity or not text(identity.name, 96) or identity.resolution == "conflicting" then return false end
+    -- Someone already in the group is placed, as for a whisper received here.
+    if isMember(groupMembers(), identity) then return false end
+    local timestamp = now()
+    if not timestamp then return false end
+    prune()
+    local key, record = findRecord(identity)
+    -- A row built from whispers received here is richer than a copy of someone else's.
+    if record and not record.remote then return false end
+    local lastSeen, firstSeen = timestamp - lastAge, timestamp - firstAge
+    if not record then
+        local total = 0
+        for _ in pairs(records) do total = total + 1 end
+        if total >= LIMIT then
+            overflowCount = overflowCount + 1
+            status.overflowCount = overflowCount
+            notify()
+            return false
+        end
+        record = {
+            key = key, identity = identity, remote = true, firstSeenAt = firstSeen, lastSeenAt = lastSeen,
+            count = count, acceptedMessageCount = count, firstListingEpoch = context.epoch,
+            lastListingEpoch = context.epoch, generation = generation,
+        }
+        records[key] = record
+    else
+        record.firstSeenAt, record.lastSeenAt = math.min(record.firstSeenAt, firstSeen), math.max(record.lastSeenAt, lastSeen)
+        record.count = math.max(record.count, count)
+        record.acceptedMessageCount = record.count
+    end
+    record.reporter = reporter
+    local class, level, race, sex = classTokens[entry.classToken] and entry.classToken, integer(entry.level, 1, 70) and entry.level,
+        raceTokens[entry.race] and entry.race, sexValue(entry.sex)
+    if class then record.classToken, record.observedClassToken = class, class end
+    if level then record.level, record.observedLevel = level, level end
+    if race then record.observedRace = race end
+    if sex then record.observedSex = sex end
+    notify()
+    return true
+end
+
+-- A leader or assistant dropped a player from the roster.
+function W.RemoveRemote(name, realm)
+    if not initialized or not syncRole or type(A.ResolveWhisperIdentity) ~= "function" then return false end
+    if not text(name, 96) or (realm ~= nil and not text(realm, 120)) then return false end
+    local identity = A.ResolveWhisperIdentity(realm and (name .. "-" .. realm) or name, nil)
+    if not identity or not text(identity.name, 96) then return false end
+    local key, record = findRecord(identity)
+    if not record then return false end
+    records[key], selected[key] = nil, nil
+    if record.identity.guid and guidKeys[record.identity.guid] == key then guidKeys[record.identity.guid] = nil end
     save()
     notify()
     return true
+end
+
+-- A leader or assistant reset the roster for the whole group.
+function W.ResetRemote()
+    if not initialized or not syncRole or not resetRoster(false, true) then return false end
+    notify()
+    return true
+end
+
+-- A viewer sees the roster and changes nothing in it.
+function W.IsReadOnly()
+    return syncRole == "viewer"
+end
+
+function W.SyncRole()
+    return syncRole
+end
+
+-- `listener(event, ...)` hears "upsert" (a row changed here), "remove" (key, identity), "reset" (automatic) and "state".
+function W.SetSyncListener(fn)
+    syncListener = fn
+end
+
+-- `relay()` returns the activity ids the group's leader reported while it is listed, or nil.
+function W.SetListingRelay(fn)
+    syncListing = fn
 end
 
 function W.SetChangedCallback(fn)
@@ -463,6 +681,7 @@ function W.GetSelection()
 end
 
 function W.ToggleSelection(key)
+    if syncRole == "viewer" then return end
     if records[key] then selected[key] = not selected[key] or nil; notify() end
 end
 
@@ -477,23 +696,27 @@ end
 
 -- Drops one player. A later accepted whisper adds them again as a new row.
 function W.Remove(key)
+    if syncRole == "viewer" then return false end
     local record = records[key]
     if not record then return false end
     records[key], selected[key] = nil, nil
     local guid = record.identity.guid
     if guid and guidKeys[guid] == key then guidKeys[guid] = nil end
     save()
+    emit("remove", key, record.identity)
     notify()
     return true
 end
 
 function W.Clear()
+    if syncRole == "viewer" then return end
     generation = generation + 1
     records, guidKeys, selected, deliveries, deliveryOrder = {}, {}, {}, {}, {}
     overflowCount = 0
     context.epoch, context.signature, context.activityIDs, context.contextState = 1, nil, {}, "unknown"
-    confirmedPresence, seenListing = nil, false
+    confirmedPresence, seenListing, disbanded = nil, false, false
     save()
+    emit("reset", false)
     W.RefreshState(true)
     notify()
 end
@@ -533,8 +756,9 @@ function W.Initialize()
     eventFrame:SetScript("OnEvent", function(_, event, ...)
         if event == "CHAT_MSG_WHISPER" then W.Receive(...); return end
         if event == "PLAYER_LEAVING_WORLD" then worldReady = false
-        elseif event == "PLAYER_ENTERING_WORLD" then worldReady = true end
+        elseif event == "PLAYER_ENTERING_WORLD" then worldReady, settled = true, true end
         W.RefreshState(true, event == "PARTY_LEADER_CHANGED")
+        if event == "GROUP_ROSTER_UPDATE" then dropJoined() end
         notify()
     end)
     W.RefreshState(true)

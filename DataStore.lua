@@ -4,17 +4,18 @@ local function integer(value, minimum, maximum)
     return type(value) == "number" and value == math.floor(value) and value >= minimum and value <= maximum
 end
 
-local function versionParts(value)
+-- Pack requirements are strict X.Y.Z; the TOC version may carry a data-release suffix.
+local function versionParts(value, allowSuffix)
     if type(value) ~= "string" then return nil end
-    local major, minor, patch = value:match("^(%d+)%.(%d+)%.(%d+)$")
+    local major, minor, patch = value:match(allowSuffix and "^(%d+)%.(%d+)%.(%d+)" or "^(%d+)%.(%d+)%.(%d+)$")
     if not major then return nil end
     return tonumber(major), tonumber(minor), tonumber(patch)
 end
 
 local function supportsVersion(required)
     local major, minor, patch = versionParts(required)
-    local ownMajor, ownMinor, ownPatch = versionParts(A.version)
-    if not major then return false end
+    local ownMajor, ownMinor, ownPatch = versionParts(A.version, true)
+    if not major or not ownMajor then return false end
     if ownMajor ~= major then return ownMajor > major end
     if ownMinor ~= minor then return ownMinor > minor end
     return ownPatch >= patch

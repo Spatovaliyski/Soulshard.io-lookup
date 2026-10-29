@@ -2,7 +2,7 @@
 ## Title: Soulshard Lookup
 ## IconTexture: Interface\AddOns\SoulshardLookup\Media\Soulshard.tga
 ## Notes: Nearby inspection, saved TBC profiles and native LFG annotations
-## Version: 0.4.1
+## Version: 0.4.2
 ## SavedVariables: ArmoryLookupPreferences
 Core.lua
 Codec.lua
@@ -26,6 +26,7 @@ UI/Search.lua
 UI/Profile.lua
 WhisperProfiles.lua
 Whispers.lua
+WhisperSync.lua
 UI/Whispers.lua
 Integrations/TbcLfg.lua
 Integrations/Players.lua

@@ -1,5 +1,6 @@
-local _, A = ...
-A.version = "0.4.1"
+local addonName, A = ...
+-- The TOC owns the version. Packaged data releases append a suffix after the numeric part.
+A.version = (C_AddOns and C_AddOns.GetAddOnMetadata or GetAddOnMetadata)(addonName, "Version") or "0.0.0"
 A.interface = 20506
 A.staleAfter = 86400
 A.state = "No saved data installed. Install an exported Data folder and restart WoW."
@@ -38,6 +39,7 @@ events:SetScript("OnEvent", function(_, event, name)
             if A.WhisperUI then A.WhisperUI.Refresh() end
         end) ~= nil then A.Print(A.state) end
         if A.Whispers then A.Whispers.Initialize() end
+        if A.WhisperSync then A.WhisperSync.Initialize() end
         if A.WhisperUI then A.WhisperUI.Initialize() end
     end
     if A.LfgEvent then A.LfgEvent(event, name) end
@@ -52,6 +54,7 @@ SlashCmdList.SOULSHARDLOOKUP = function(message)
     message = (message or ""):match("^%s*(.-)%s*$")
     local command, argument = message:match("^(%S*)%s*(.-)$")
     if command == "settings" and A.WhisperUI then A.WhisperUI.OpenSettings(); return end
+    if command == "whispers" and A.WhisperUI then A.WhisperUI.Open(); return end
     if command == "motion" then
         if argument == "on" or argument == "off" then
             A.Motion.SetEnabled(argument == "on")
@@ -83,5 +86,5 @@ SlashCmdList.SOULSHARDLOOKUP = function(message)
         for _, message in ipairs(A.diagnostics) do A.Print("Data: " .. message) end
     elseif command ~= "status" then A.ShowSearch(message); return end
     A.Print(A.state)
-    A.Print("/sl or /lookup to search your realm · /sl inspect Name or Name-Realm · /sl settings · /sl motion on|off · /sl diagnostics")
+    A.Print("/sl or /lookup to search your realm · /sl inspect Name or Name-Realm · /sl whispers · /sl settings · /sl motion on|off · /sl diagnostics")
 end

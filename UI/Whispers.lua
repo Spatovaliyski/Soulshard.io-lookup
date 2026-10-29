@@ -1,32 +1,36 @@
 local _, A = ...
 local T, W, P = A.Theme, A.Whispers, A.WhisperProfiles
+local M = A.Motion
 local U = {}
 A.WhisperUI = U
 
--- Layout. Everything below is in UI units; the window scales down (never up) to fit the screen.
-local width, gutter, pageTop = 540, 20, 160
-local inner = width - gutter * 2
-local visibleRows, rowHeight, trackWidth = 7, 56, 8
-local rowWidth = inner - trackWidth - 6
--- Roster page rhythm, top to bottom: the class chips, the list header, the list box, then the footer (Clear
--- roster and Bulk Search, with a hint line under them). The player and whisper count sits in the status strip.
-local chipsTop, headerTop = 4, 60
-local listTop, listHeight = 96, visibleRows * rowHeight + 2
-local footerTop = listTop + listHeight + 10
-local rosterHeight, settingsHeight = footerTop + 32 + 12 + 20, 598
-local bottomPad = 14
--- Each tab sizes the window to its own page.
-local windowHeights = { roster = pageTop + rosterHeight + bottomPad, settings = pageTop + settingsHeight + bottomPad }
-local height = math.max(windowHeights.roster, windowHeights.settings)
--- Status strip: the reason on the left, the count right-aligned behind a hairline on the roster.
-local countWidth = 84
--- Row portrait: a class-coloured ring around a circular portrait, a class badge at the lower right and a level badge at the lower left.
-local ringX, ringSize, portraitSize, badgeSize, textX = 46, 46, 42, 22, 110
--- Navigation row (the tabs, plus the raid-parse picker on the roster) sits under the status strip.
-local navTop, navHeight, tabWidth, tabGap = 114, 32, 112, 6
-local tabPitch = tabWidth + tabGap
-local classes = { "ALL", "WARRIOR", "PALADIN", "HUNTER", "ROGUE", "PRIEST", "SHAMAN", "MAGE", "WARLOCK", "DRUID", "UNKNOWN" }
-local classNames = { ALL = "All classes", UNKNOWN = "Unknown" }
+-- The Whisper roster is the third tab of the native Looking For Group frame. Everything below is in
+-- LFGParentFrame units (the frame is 384 wide and 512 tall) and follows the numbers in Blizzard's own XML
+-- (Blizzard_GroupFinder_VanillaStyle): the dark inset the native list fills is x 22..346 and y 129..411, the native
+-- button row sits 79 units above the bottom edge, and the tabs hang below the art. Nothing is drawn outside that.
+-- The portrait ring covers the top left, so the banner starts to its right; the native options gear sits at the
+-- top right of the header, which is where ours goes.
+local frameLeft, frameWidth = 22, 324
+local bannerX, bannerTop, bannerWidth = 82, 46, 240
+local dropdownLeft, dropdownGap, dropdownTop, dropdownHeight = 26, 5, 96, 24
+local raidWidth, viewWidth = 195, 116
+local headerTop, headerHeight = 133, 20
+local listTop, listHeight = 155, 254
+local buttonLeft, buttonRight, buttonBottom, buttonHeight = 19, 40, 79, 22
+local trackWidth = 6
+local viewportWidth, viewportHeight = frameWidth, listHeight
+local rowWidth = viewportWidth - trackWidth - 6
+local playerHeight, headingHeight, sectionGap, poolSize = 42, 26, 8, 12
+-- Settings opens beside the frame: the native window is about 353 wide, so its pop-up starts just past that.
+local popupLeft, popupTop = 358, 8
+-- Right-aligned metric columns: GearScore, average parse, best parse.
+local gsWidth, parseWidth, columnGap, columnEdge = 44, 30, 2, 4
+local bestX = rowWidth - columnEdge - parseWidth
+local avgX = bestX - columnGap - parseWidth
+local gsX = avgX - columnGap - gsWidth
+local edge = { bgFile = "Interface\\Buttons\\WHITE8X8", edgeFile = "Interface\\Buttons\\WHITE8X8", edgeSize = 1 }
+
+local classOrder = { "WARRIOR", "PALADIN", "HUNTER", "ROGUE", "PRIEST", "SHAMAN", "MAGE", "WARLOCK", "DRUID", "UNKNOWN" }
 local modes = { "any", "keywords", "prefix" }
 local modeNames = { any = "Any whisper", keywords = "Keywords", prefix = "Prefix" }
 local modeHelp = {
@@ -34,44 +38,41 @@ local modeHelp = {
     keywords = "Whispers containing any keyword are collected.",
     prefix = "Whispers starting with this text are collected.",
 }
-local sorts = { "recent", "name", "score" }
-local sortNames = { recent = "Recent", name = "Name" }
-local edge = { bgFile = "Interface\\Buttons\\WHITE8X8", edgeFile = "Interface\\Buttons\\WHITE8X8", edgeSize = 1 }
 
-local M = A.Motion
--- Type in this window runs one point larger than the shared defaults.
-local TEXT_BUMP = 1
-
-local initialized, native, frame, pending, manuallyClosed = false, nil, nil, false, false
-local classFilter, contextID, offset, sortKey, currentTab = "ALL", nil, 0, "recent", "roster"
-local views, anchorIndex, anchorState, syncing = {}, nil, false, false
-local refreshRoster, selectTab, showCopy, showConfirm, closeOverlays
-
-local function fitHeight(tab)
-    if frame then frame:SetHeight(windowHeights[tab] or height) end
-end
+local initialized, native, panel, tab = false, nil, nil, nil
+local active, queued = false, false
+-- Raid parses: nil follows the raid the group is listed for (Auto), false shows none, a string pins that raid.
+local choice, grouping = nil, "class"
+local contextID
+local folded, acknowledged = {}, {}
+local entries, items, order = {}, {}, {}
+local offset, maxOffset = 0, 0
+local anchorKey, anchorState
+local menus, hideMenus, closeOverlays, showSettings, showCopy
 
 ---------------------------------------------------------------------------
 -- Small helpers
 ---------------------------------------------------------------------------
 
 local function className(token)
-    return classNames[token] or (LOCALIZED_CLASS_NAMES_MALE and LOCALIZED_CLASS_NAMES_MALE[token]) or
-        (token:sub(1, 1) .. token:sub(2):lower())
-end
-
-local function value(number)
-    return number ~= nil and tostring(math.floor(number + 0.5)) or "—"
+    if token == "UNKNOWN" then return "Unknown" end
+    return (LOCALIZED_CLASS_NAMES_MALE and LOCALIZED_CLASS_NAMES_MALE[token]) or (token:sub(1, 1) .. token:sub(2):lower())
 end
 
 local function plural(count, singular, many)
     return count .. " " .. (count == 1 and singular or (many or singular .. "s"))
 end
 
+local function thousands(number)
+    local digits = tostring(math.floor(number + .5))
+    local grouped = digits:reverse():gsub("(%d%d%d)", "%1,"):reverse()
+    return (grouped:gsub("^,", ""))
+end
+
 local function hex(color)
     return string.format("|cff%02x%02x%02x", math.floor(color[1] * 255 + .5), math.floor(color[2] * 255 + .5), math.floor(color[3] * 255 + .5))
 end
-local mutedHex, dangerHex = hex(T.muted), hex(T.danger)
+local mutedHex, dangerHex, goldHex = hex(T.muted), hex(T.danger), hex(T.gold)
 
 local function ago(timestamp)
     if type(timestamp) ~= "number" then return "?" end
@@ -87,7 +88,7 @@ local function sameRealm(realm)
     if type(GetRealmName) ~= "function" then return false end
     local ok, own = pcall(GetRealmName)
     if not ok or type(own) ~= "string" then return false end
-    local function normal(text) return (text:lower():gsub("[%s%-']", "")) end
+    local function normal(value) return (value:lower():gsub("[%s%-']", "")) end
     return normal(own) == normal(realm)
 end
 
@@ -106,51 +107,47 @@ local function fill(parent, x, y, w, h, color, alpha, layer)
     return T.Fill(parent, x, y, w, h, color, alpha, layer)
 end
 
--- The shared text and button builders with this window's one-point type bump applied.
 local function Label(parent, size, color, serif)
-    return T.Text(parent, size + TEXT_BUMP, color, serif)
+    return T.Text(parent, size, color, serif)
 end
 
-local function Button(parent, title, w, h, onClick, variant)
-    return T.Button(parent, title, w, h, onClick, variant, (variant == "primary" and 15 or 14) + TEXT_BUMP)
-end
-
--- Text region anchored at the top-left of its parent.
+-- Text region anchored at the top-left of its parent. With a width it stays on one line.
 local function text(parent, size, color, x, y, w, h, justify, serif)
     local region = Label(parent, size, color, serif)
     region:SetPoint("TOPLEFT", x, -y)
     if w then
         region:SetSize(w, h or size + 8)
         region:SetMaxLines(1)
+        if region.SetWordWrap then region:SetWordWrap(false) end
     end
     if justify then region:SetJustifyH(justify) end
     return region
 end
 
 local function input(parent, x, y, inputWidth, hint)
-    local edit = CreateFrame("EditBox", nil, parent, "BackdropTemplate")
-    edit:SetSize(inputWidth, 32)
-    edit:SetPoint("TOPLEFT", x, -y)
-    edit:SetAutoFocus(false)
-    edit:SetMaxLetters(1400)
-    edit:SetFont(T.bodyFont, 14 + TEXT_BUMP, "")
-    edit:SetTextColor(unpack(T.cream))
-    edit:SetTextInsets(10, 10, 0, 0)
-    edit:SetBackdrop(edge)
-    edit:SetBackdropColor(unpack(T.input))
-    edit:SetBackdropBorderColor(unpack(T.line))
-    edit.placeholder = Label(edit, 13, T.muted)
-    edit.placeholder:SetPoint("LEFT", 10, 0)
-    edit.placeholder:SetText(hint or "")
-    edit:SetScript("OnTextChanged", function(self, user)
+    local box = CreateFrame("EditBox", nil, parent, "BackdropTemplate")
+    box:SetSize(inputWidth, 30)
+    box:SetPoint("TOPLEFT", x, -y)
+    box:SetAutoFocus(false)
+    box:SetMaxLetters(1400)
+    box:SetFont(T.bodyFont, 14, "")
+    box:SetTextColor(unpack(T.cream))
+    box:SetTextInsets(10, 10, 0, 0)
+    box:SetBackdrop(edge)
+    box:SetBackdropColor(unpack(T.input))
+    box:SetBackdropBorderColor(unpack(T.line))
+    box.placeholder = Label(box, 13, T.muted)
+    box.placeholder:SetPoint("LEFT", 10, 0)
+    box.placeholder:SetText(hint or "")
+    box:SetScript("OnTextChanged", function(self, user)
         self.placeholder:SetShown(self:GetText() == "")
         if self.changed then self.changed(self, user) end
     end)
-    edit:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
-    edit:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
-    edit:SetScript("OnEditFocusGained", function(self) self:SetBackdropBorderColor(unpack(T.gold)) end)
-    edit:SetScript("OnEditFocusLost", function(self) self:SetBackdropBorderColor(unpack(T.line)) end)
-    return edit
+    box:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+    box:SetScript("OnEnterPressed", function(self) self:ClearFocus() end)
+    box:SetScript("OnEditFocusGained", function(self) self:SetBackdropBorderColor(unpack(T.gold)) end)
+    box:SetScript("OnEditFocusLost", function(self) self:SetBackdropBorderColor(unpack(T.line)) end)
+    return box
 end
 
 -- A drawn check box (no font glyphs): "off", "on" or "partial".
@@ -162,6 +159,7 @@ local function checkbox(parent)
     box.long:SetRotation(math.pi / 4)
     box.dash = fill(box, 4, 8, 10, 2, T.gold, 1, "OVERLAY")
     function box:SetState(state)
+        self.state = state
         self.short:SetShown(state == "on")
         self.long:SetShown(state == "on")
         self.dash:SetShown(state == "partial")
@@ -183,180 +181,88 @@ local function caret(parent, color)
     return holder
 end
 
--- Text-only button with a gold underline when active (tabs and sort keys).
-local function flat(parent, title, w, h, size, onClick, serif)
-    local button = CreateFrame("Button", nil, parent)
+-- Fold glyph: a bordered square holding a minus, or a plus while folded.
+local function foldGlyph(parent)
+    local glyph = T.Panel(parent, 16, 16, true)
+    fill(glyph, 3, 7, 8, 2, T.gold, 1, "OVERLAY")
+    glyph.vertical = fill(glyph, 6, 4, 2, 8, T.gold, 1, "OVERLAY")
+    function glyph:SetFolded(isFolded) self.vertical:SetShown(isFolded) end
+    return glyph
+end
+
+-- Settings gear drawn from flat shapes: four bars make eight teeth, a disc is the body, a smaller one the hole.
+local function gear(parent, size, color)
+    local holder = CreateFrame("Frame", nil, parent)
+    holder:SetSize(size, size)
+    holder.regions = {}
+    local function place(texture, width, height, rotation)
+        texture:ClearAllPoints()
+        texture:SetPoint("CENTER", 0, 0)
+        texture:SetSize(width, height)
+        if rotation then texture:SetRotation(rotation) end
+        holder.regions[#holder.regions + 1] = texture
+    end
+    for step = 0, 3 do
+        local bar = holder:CreateTexture(nil, "ARTWORK")
+        bar:SetColorTexture(color[1], color[2], color[3], 1)
+        place(bar, size, math.max(2, size * .2), step * math.pi / 4)
+    end
+    local body = T.Disc(holder, "CENTER", 0, 0, size * .72, color, 1, "ARTWORK", 1)
+    local hole = T.Disc(holder, "CENTER", 0, 0, size * .3, T.background, 1, "ARTWORK", 2)
+    holder.regions[#holder.regions + 1] = body
+    function holder:SetColor(value)
+        for index, region in ipairs(self.regions) do
+            if region ~= hole then region:SetColorTexture(value[1], value[2], value[3], 1) end
+        end
+    end
+    return holder
+end
+
+local function reveal(region)
+    M.Play(region, { duration = M.timing.message, fromY = -6 })
+end
+
+---------------------------------------------------------------------------
+-- Buttons: the native red button for actions
+---------------------------------------------------------------------------
+
+local buttonFonts
+local function buttonFont()
+    if buttonFonts then return buttonFonts end
+    local face = STANDARD_TEXT_FONT or T.headingFont
+    local function make(name, color)
+        local font = CreateFont(name)
+        font:SetFont(face, T.minimumFontSize, "")
+        font:SetTextColor(color[1], color[2], color[3])
+        return font
+    end
+    buttonFonts = {
+        normal = make("SoulshardLookupWhisperButton", { 1, .82, 0 }),
+        highlight = make("SoulshardLookupWhisperButtonHighlight", { 1, 1, 1 }),
+        disabled = make("SoulshardLookupWhisperButtonDisabled", { .5, .5, .5 }),
+    }
+    return buttonFonts
+end
+
+local function setEnabled(button, enabled)
+    button.isEnabled = enabled
+    if type(button.SetEnabled) == "function" then button:SetEnabled(enabled)
+    elseif enabled and type(button.Enable) == "function" then button:Enable()
+    elseif not enabled and type(button.Disable) == "function" then button:Disable() end
+end
+
+-- Blizzard's own red button, with its text at the addon's minimum size. A disabled button greys out and ignores clicks.
+local function redButton(parent, label, w, h, onClick)
+    local button = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
+    local fonts = buttonFont()
     button:SetSize(w, h)
-    button.label = Label(button, size, T.muted, serif)
-    button.label:SetPoint("CENTER")
-    button.label:SetJustifyH("CENTER")
-    button.label:SetText(title)
-    button.line = fill(button, 0, h - 2, w, 2, T.gold, 1, "ARTWORK")
-    button.line:Hide()
-    function button:Paint()
-        self.label:SetTextColor(unpack(self.active and T.gold or (self.hovered and T.cream or T.muted)))
-    end
-    function button:SetActive(active)
-        self.active = active
-        self.line:SetShown(active)
-        self:Paint()
-    end
-    button:SetScript("OnClick", onClick)
-    button:SetScript("OnEnter", function(self) self.hovered = true; self:Paint() end)
-    button:SetScript("OnLeave", function(self) self.hovered = false; self:Paint() end)
+    button:SetNormalFontObject(fonts.normal)
+    button:SetHighlightFontObject(fonts.highlight)
+    button:SetDisabledFontObject(fonts.disabled)
+    button:SetText(label)
+    button.isEnabled = true
+    button:SetScript("OnClick", function(self, ...) if self.isEnabled then onClick(self, ...) end end)
     return button
-end
-
--- Row with a check box, a title and a one-line description.
-local function option(parent, x, y, w, title, description, onClick)
-    local row = CreateFrame("Button", nil, parent)
-    row:SetSize(w, description and 40 or 26)
-    row:SetPoint("TOPLEFT", x, -y)
-    row.box = checkbox(row)
-    row.box:SetPoint("TOPLEFT", 0, -1)
-    row.title = text(row, 14, T.cream, 30, 0, w - 30, 22)
-    row.title:SetText(title)
-    if description then
-        row.description = text(row, 13, T.muted, 30, 21, w - 30, 18)
-        row.description:SetText(description)
-    end
-    function row:SetChecked(checked)
-        self.checked = checked
-        self.box:SetState(checked and "on" or "off")
-    end
-    row:SetScript("OnClick", onClick)
-    row:SetScript("OnEnter", function(self) self.title:SetTextColor(unpack(T.gold)) end)
-    row:SetScript("OnLeave", function(self) self.title:SetTextColor(unpack(T.cream)) end)
-    return row
-end
-
-local function card(parent, y, h, title)
-    local panel = T.Panel(parent, inner, h)
-    panel:SetPoint("TOPLEFT", 0, -y)
-    local heading = text(panel, 13, T.gold, 16, 10, inner - 32, 20)
-    heading:SetText(title)
-    T.Rule(panel, 1, 36, inner - 2)
-    return panel
-end
-
----------------------------------------------------------------------------
--- Motion
----------------------------------------------------------------------------
-
--- The window borrows the profile page's vocabulary: staged fades with a short rise, a light sweep along the
--- title rule, a sliding tab underline and a slide between pages. `animated` is the single gate for all of it,
--- so /sl motion off and the "Animate window" setting both fall back to plain, immediate changes.
-local tracked = {}
-local cancelMotion, placeTabLine
-
-local function animated()
-    return M.Enabled() and W.GetSettings().animate ~= false
-end
-
--- Every region this window animates is recorded so one call can put them all back at rest.
-local function settle()
-    for region in pairs(tracked) do M.Stop(region) end
-    tracked = {}
-end
-
-local function play(region, options)
-    tracked[region] = true
-    if animated() then M.Play(region, options); return end
-    M.Stop(region)
-    region:SetAlpha(options.toAlpha or 1)
-    if options.finish then options.finish() end
-end
-
-local function reveal(region, delay, duration, rise, finish)
-    play(region, { delay = delay, duration = duration, fromY = -(rise or 0), finish = finish })
-end
-
--- Eases a texture's alpha to `target`. It jumps there when motion is off or the row now shows someone else.
-local function ease(texture, target, instant)
-    tracked[texture] = true
-    local from = M.Alpha(texture)
-    if instant or not animated() or not frame or not frame:IsShown() or math.abs(from - target) < .01 then
-        M.Stop(texture)
-        texture:SetAlpha(target)
-        return
-    end
-    M.Play(texture, { fromAlpha = from, toAlpha = target, duration = M.timing.hover, restAlpha = target })
-end
-
--- Rows fade up in a short cascade after the list itself changes (class chip, sort, raid context).
-local function revealRows()
-    if not frame or not animated() then return end
-    for index, row in ipairs(frame.rows) do
-        if row:IsShown() then reveal(row, (index - 1) * M.timing.rowStagger, M.timing.row, 6) end
-    end
-    if frame.empty:IsShown() then reveal(frame.empty, 0, M.timing.row, 6) end
-end
-
-local function revealRoster()
-    local timing = M.timing
-    local base = timing.rowDelay
-    reveal(frame.count, base - .04, timing.row, 8)
-    reveal(frame.chipStrip, base - .02, timing.row, 8)
-    reveal(frame.listHeader, base, timing.row, 8)
-    for index, row in ipairs(frame.rows) do
-        if row:IsShown() then reveal(row, base + .02 + (index - 1) * timing.rowStagger, timing.row, 8) end
-    end
-    if frame.empty:IsShown() then reveal(frame.empty, base + .02, timing.row, 8) end
-    reveal(frame.footer, base + .14, timing.row, 6)
-end
-
-local function revealSettings()
-    local timing = M.timing
-    for index, panel in ipairs(frame.settings.cards) do
-        reveal(panel, timing.treeDelay + (index - 1) * timing.treeStagger, timing.tree, 8)
-    end
-end
-
-local function revealWindow()
-    local timing = M.timing
-    reveal(frame, 0, timing.window, 0)
-    reveal(frame.head, 0, timing.identity, 6)
-    reveal(frame.statusStrip, timing.scoreDelay, timing.score, 6)
-    reveal(frame.nav, timing.summaryDelay, timing.summary, 6)
-    if currentTab == "roster" then revealRoster() else revealSettings() end
-    if animated() then
-        frame.sweep:Show()
-        play(frame.sweep, { fromAlpha = 1, toAlpha = 0, toX = width - 2 - 72, duration = timing.sweep, finish = function() frame.sweep:Hide() end })
-    end
-end
-
--- The window starts invisible and begins its entrance one frame later, so anchors and scale have settled
--- before anything translates.
-local function openMotion()
-    if not animated() then return end
-    frame:SetAlpha(0)
-    local generation = frame.motionGeneration
-    frame:SetScript("OnUpdate", function(self)
-        if self.motionGeneration ~= generation or not self:IsShown() then return end
-        self:SetScript("OnUpdate", nil)
-        revealWindow()
-    end)
-end
-
-function placeTabLine()
-    local line = frame.tabLine
-    line:ClearAllPoints()
-    line:SetPoint("TOPLEFT", frame.nav, "TOPLEFT", (currentTab == "settings" and 1 or 0) * tabPitch, -(navHeight - 3))
-end
-
--- Stops every running motion and puts the window in the state its current tab implies.
-function cancelMotion()
-    if not frame then return end
-    frame.motionGeneration = (frame.motionGeneration or 0) + 1
-    frame:SetScript("OnUpdate", nil)
-    settle()
-    frame:SetAlpha(1)
-    frame.sweep:Hide()
-    frame.roster:SetShown(currentTab == "roster")
-    frame.settings:SetShown(currentTab == "settings")
-    frame.contextButton:SetShown(currentTab == "roster")
-    fitHeight(currentTab)
-    placeTabLine()
 end
 
 ---------------------------------------------------------------------------
@@ -366,17 +272,17 @@ end
 local statusCopy = {
     recording = { "good", "Recording", "Collecting whispers while your group is listed." },
     ["not-grouped"] = { "warn", "Paused", "Join or start a raid" },
-    ["not-leader-or-assistant"] = { "warn", "Paused", "Only the leader or an assistant can collect." },
+    viewing = { "good", "Viewing", "Sign-ups shared by your group's leaders. Read only." },
     ["not-listed"] = { "warn", "Paused", "List your group in Looking For Group to collect." },
     disabled = { "off", "Off", "Collection is switched off in Settings." },
     ["unsupported-client"] = { "bad", "Unavailable", "Requires the TBC Anniversary client (20506)." },
     ["storage-incompatible"] = { "bad", "Unavailable", "Saved data needs a newer version of the addon." },
 }
 local tones = { good = T.good, warn = T.gold, bad = T.danger, off = T.muted }
--- The empty roster explains what a paused state still needs in one paragraph; the status strip keeps the short reason.
+-- The empty roster explains what a paused state still needs in one paragraph; the banner keeps the short reason.
 local pausedCopy = {
     ["not-grouped"] = "Collection starts once you are in a party or raid that you lead or assist, with the group listed in Looking For Group.",
-    ["not-leader-or-assistant"] = "Only the party leader or a raid assistant can collect whispers. Ask for assist or lead the group yourself, and keep it listed in Looking For Group.",
+    viewing = "Your leader or an assistant collects the sign-ups and shares them here. You can look, but not change anything.",
     ["not-listed"] = "Your group is not listed yet. List it in Looking For Group and the players who whisper you will appear here.",
 }
 
@@ -389,211 +295,294 @@ local function describe(status)
 end
 
 ---------------------------------------------------------------------------
--- Window chrome
+-- Raid parses: Auto follows the listing
 ---------------------------------------------------------------------------
 
-local function anchor()
-    if not frame then return end
-    local scale = math.min(.8, (UIParent:GetWidth() - 24) / width, (UIParent:GetHeight() - 24) / height)
-    frame:SetScale(scale)
-    frame:ClearAllPoints()
-    if not native then frame:SetPoint("CENTER", UIParent, "CENTER"); return end
-    local right = native.GetRight and native:GetRight()
-    local nativeScale = native.GetEffectiveScale and native:GetEffectiveScale() or 1
-    local parentScale = UIParent.GetEffectiveScale and UIParent:GetEffectiveScale() or 1
-    local fitsRight = not right or right * nativeScale / parentScale + width * scale + 12 <= UIParent:GetWidth()
-    if fitsRight then frame:SetPoint("TOPLEFT", native, "TOPRIGHT", 12, 0)
-    else frame:SetPoint("TOPRIGHT", native, "TOPLEFT", -12, 0) end
+local function autoRaid()
+    local status = W.GetStatus()
+    local activityIDs = W.GetContext().activityIDs
+    -- A viewer does not own the listing; the leader's addon reports which raid it is for.
+    if status.state == "viewing" and A.WhisperSync then activityIDs = A.WhisperSync.Listing() or {} end
+    if status.state ~= "recording" and status.state ~= "viewing" then return nil, "No listing" end
+    local raid = P.RaidForActivities(activityIDs)
+    if raid then return raid end
+    return nil, "Unknown raid"
 end
 
--- A menu and its click-away catcher always change together.
-local function hideMenus()
-    if not frame then return end
-    for _, name in ipairs({ "contextMenu", "rowMenu" }) do
-        local menu = frame[name]
-        if menu then
-            M.Stop(menu)
-            menu:Hide()
-            menu.catcher:Hide()
+-- The raid whose parses fill the Avg and Best columns, plus what Auto currently resolves to.
+local function effectiveContext()
+    local raid, reason = autoRaid()
+    if choice == nil then return raid and raid.id or nil, raid, reason end
+    if choice == false then return nil, raid, reason end
+    return choice, raid, reason
+end
+
+local function raidName(id)
+    for _, raid in ipairs(P.Contexts()) do if raid.id == id then return raid.name end end
+    return "Raid parses"
+end
+
+---------------------------------------------------------------------------
+-- Dropdowns and menus (drawn here; no dependency on native menu templates)
+---------------------------------------------------------------------------
+
+-- Blizzard's own dropdown art: the dark text holder with its bronze rim and the arrow button, the same atlases the native
+-- Group Browser's dropdowns use (WowStyle1DropdownTemplate in Blizzard_Menu, Classic family, which is what the TBC
+-- Anniversary client loads). Each name is checked against the client; if any is missing the dropdowns keep the flat
+-- bordered style, so a client without them still gets a working control.
+local dropdownArt, menuArt
+local function atlasKnown(name)
+    local lookup = (C_Texture and C_Texture.GetAtlasInfo) or GetAtlasInfo
+    return type(lookup) == "function" and lookup(name) ~= nil
+end
+
+local function dropdownArtwork()
+    if dropdownArt ~= nil then return dropdownArt or nil end
+    dropdownArt = false
+    local field, arrow = "common-dropdown-classic-textholder", "common-dropdown-classic-a-buttonDown"
+    if atlasKnown(field) and atlasKnown(arrow) then
+        local states = { [""] = arrow }
+        for _, state in ipairs({ "hover", "pressed", "pressedhover" }) do
+            states[state] = atlasKnown(arrow .. "-" .. state) and (arrow .. "-" .. state) or arrow
+        end
+        dropdownArt = { field = field, small = atlasKnown(field .. "-small") and (field .. "-small") or field, states = states }
+    end
+    return dropdownArt or nil
+end
+
+-- The popup menus take the native menu frame (a bronze border with a darkened inside), or stay flat without it.
+local function menuArtwork()
+    if menuArt ~= nil then return menuArt or nil end
+    menuArt = atlasKnown("common-dropdown-classic-bg") and "common-dropdown-classic-bg" or false
+    return menuArt or nil
+end
+
+local function dropdown(parent, x, w, prefix, onClick)
+    local art = dropdownArtwork()
+    local button = CreateFrame("Button", nil, parent, not art and "BackdropTemplate" or nil)
+    button:SetSize(w, dropdownHeight)
+    button:SetPoint("TOPLEFT", x, -dropdownTop)
+    if art then
+        -- Native placement: the field art reaches 9 left, 8 right, 8 above and 9 below the control's own rectangle.
+        button.field = button:CreateTexture(nil, "BACKGROUND")
+        button.field:SetPoint("TOPLEFT", -9, 8)
+        button.field:SetPoint("BOTTOMRIGHT", 8, -9)
+        button.field:SetAtlas(w <= 100 and art.small or art.field)
+        button.arrow = button:CreateTexture(nil, "OVERLAY")
+        button.arrow:SetPoint("RIGHT", -1, 0)
+        button.arrow:SetAtlas(art.states[""], true)
+        function button:PaintArrow()
+            local state = (self.down and self.over and "pressedhover") or (self.over and "hover") or (self.down and "pressed") or ""
+            self.arrow:SetAtlas(art.states[state], true)
+        end
+    else
+        button:SetBackdrop(edge)
+        button:SetBackdropColor(unpack(T.input))
+        button:SetBackdropBorderColor(unpack(T.line))
+        caret(button, T.gold)
+    end
+    local prefixWidth = 0
+    -- The native dropdown sets its text in the game's small fonts (white value, gold caption), which is also what makes
+    -- two labels fit a 24-high field. The flat fallback keeps the addon's own font and colours.
+    local function style(region, fontObject, fallbackFont, color)
+        if not art then region:SetTextColor(unpack(color)); return end
+        if fontObject and region.SetFontObject then
+            region:SetFontObject(fontObject)
+        else
+            if STANDARD_TEXT_FONT then region:SetFont(STANDARD_TEXT_FONT, 11, "") end
+            region:SetTextColor(unpack(fallbackFont))
         end
     end
-end
-
-local function setMenu(shown)
-    if not frame or not frame.contextMenu then return end
-    if shown then hideMenus() end
-    frame.contextMenu:SetShown(shown)
-    frame.contextMenu.catcher:SetShown(shown)
-    if shown then reveal(frame.contextMenu, 0, M.timing.message, 6) end
-end
-
-function closeOverlays(except)
-    if not frame then return end
-    for _, name in ipairs({ "copy", "confirm" }) do
-        local overlay = frame[name]
-        if name ~= except and overlay then M.Stop(overlay); overlay:Hide() end
+    if prefix then
+        button.prefix = Label(button, 13, T.muted)
+        button.prefix:SetPoint("LEFT", art and 9 or 8, 0)
+        button.prefix:SetText(prefix)
+        style(button.prefix, GameFontNormalSmall, { 1, .82, 0 }, T.muted)
+        prefixWidth = art and 38 or 50
     end
-    hideMenus()
-    frame.scrim:SetShown(except ~= nil)
+    button.value = Label(button, 13, T.cream)
+    button.value:SetPoint("LEFT", (art and 9 or 8) + prefixWidth, 0)
+    if art then
+        -- Fill whatever the arrow leaves, so the text ends with an ellipsis rather than under the arrow.
+        button.value:SetPoint("RIGHT", button.arrow, "LEFT", -2, 0)
+        button.value:SetHeight(20)
+    else
+        button.value:SetSize(w - 8 - prefixWidth - 26, 20)
+    end
+    button.value:SetMaxLines(1)
+    if button.value.SetWordWrap then button.value:SetWordWrap(false) end
+    button.value:SetJustifyH(prefix and "RIGHT" or "LEFT")
+    style(button.value, GameFontHighlightSmall, { 1, 1, 1 }, T.cream)
+    button:SetScript("OnClick", onClick)
+    button:SetScript("OnEnter", function(self)
+        if art then self.over = true; self:PaintArrow() else self:SetBackdropBorderColor(unpack(T.gold)) end
+        if self.tip then
+            GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
+            GameTooltip:AddLine(self.tip[1], unpack(T.gold))
+            GameTooltip:AddLine(self.tip[2], 1, 1, 1, true)
+            GameTooltip:Show()
+        end
+    end)
+    button:SetScript("OnLeave", function(self)
+        if art then self.over, self.down = false, false; self:PaintArrow() else self:SetBackdropBorderColor(unpack(T.line)) end
+        GameTooltip:Hide()
+    end)
+    if art then
+        button:HookScript("OnMouseDown", function(self) self.down = true; self:PaintArrow() end)
+        button:HookScript("OnMouseUp", function(self) self.down = false; self:PaintArrow() end)
+    end
+    return button
 end
 
-function U.HandleEscape()
-    if not frame then return false end
-    for _, name in ipairs({ "copy", "confirm" }) do
-        local overlay = frame[name]
-        if overlay and overlay:IsShown() then overlay:Hide(); return true end
+local function paintItem(button)
+    local entry = button.entry
+    if not entry then return end
+    local color = entry.color or (entry.danger and T.danger) or (entry.disabled and T.dim) or T.cream
+    button.label:SetTextColor(unpack(color))
+end
+
+local function createMenu(width)
+    local menu = T.Panel(panel, width, 40, true)
+    menu:SetFrameLevel(panel:GetFrameLevel() + 30)
+    local art = menuArtwork()
+    local pad = art and 9 or 6
+    if art then
+        -- The native menu frame: bronze border around a darkened inside, reaching 3 past the menu's rectangle.
+        menu:SetBackdropColor(0, 0, 0, 0)
+        menu:SetBackdropBorderColor(0, 0, 0, 0)
+        local frame = menu:CreateTexture(nil, "BACKGROUND", nil, 1)
+        frame:SetPoint("TOPLEFT", -3, 3)
+        frame:SetPoint("BOTTOMRIGHT", 3, -4)
+        frame:SetAtlas(art)
+        local shade = menu:CreateTexture(nil, "BACKGROUND", nil, 0)
+        shade:SetColorTexture(0, 0, 0, .8)
+        shade:SetPoint("TOPLEFT", frame, "TOPLEFT", 6, -6)
+        shade:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -6, 6)
+    else
+        menu:SetBackdropBorderColor(unpack(T.trim))
     end
-    if frame.contextMenu:IsShown() or frame.rowMenu:IsShown() then hideMenus(); return true end
-    if currentTab == "settings" then selectTab("roster"); return true end
+    menu.items, menu.rules = {}, {}
+    menu:Hide()
+    local function item(index)
+        local button = menu.items[index]
+        if button then return button end
+        button = CreateFrame("Button", nil, menu)
+        button:SetSize(width - pad * 2, 22)
+        button.mark = T.Disc(button, "LEFT", 6, 0, 6, T.gold, 1, "OVERLAY")
+        button.label = Label(button, 13, T.cream)
+        button.right = Label(button, 13, T.muted)
+        button.right:SetPoint("RIGHT", -8, 0)
+        button.right:SetJustifyH("RIGHT")
+        button:SetScript("OnEnter", function(self)
+            local entry = self.entry
+            if entry and not entry.disabled and not entry.title then self.label:SetTextColor(unpack(T.gold)) end
+        end)
+        button:SetScript("OnLeave", paintItem)
+        button:SetScript("OnClick", function(self)
+            local entry = self.entry
+            if not entry or entry.disabled or entry.title then return end
+            hideMenus()
+            if entry.onClick then entry.onClick() end
+        end)
+        menu.items[index] = button
+        return button
+    end
+    -- `list` holds { text, right, checked, color, danger, disabled, title, separator, onClick }.
+    function menu:Open(list, point, relative, relativePoint, x, y)
+        hideMenus()
+        local top, used, rules, radio = pad, 0, 0, false
+        for _, entry in ipairs(list) do if entry.checked ~= nil then radio = true end end
+        for _, entry in ipairs(list) do
+            if entry.separator then
+                rules = rules + 1
+                local rule = self.rules[rules]
+                if not rule then
+                    rule = fill(self, pad, 0, width - pad * 2, 1, T.line, 1, "BORDER")
+                    self.rules[rules] = rule
+                end
+                rule:ClearAllPoints()
+                rule:SetPoint("TOPLEFT", pad, -(top + 3))
+                rule:Show()
+                top = top + 8
+            else
+                used = used + 1
+                local button = item(used)
+                local height = entry.title and 26 or 22
+                button.entry = entry
+                button:SetHeight(height)
+                button:ClearAllPoints()
+                button:SetPoint("TOPLEFT", pad, -top)
+                button.label:ClearAllPoints()
+                button.label:SetPoint("LEFT", radio and 20 or 8, 0)
+                button.label:SetText(A.Text(entry.text or entry.title))
+                button.right:SetText(A.Text(entry.right or ""))
+                button.mark:SetShown(entry.checked == true)
+                paintItem(button)
+                button:Show()
+                top = top + height
+            end
+        end
+        for index = used + 1, #self.items do self.items[index].entry = nil; self.items[index]:Hide() end
+        for index = rules + 1, #self.rules do self.rules[index]:Hide() end
+        self:SetHeight(top + pad)
+        self:ClearAllPoints()
+        self:SetPoint(point, relative, relativePoint, x, y)
+        panel.catcher:Show()
+        if type(panel.EnableKeyboard) == "function" then panel:EnableKeyboard(true) end
+        self:Show()
+        reveal(self)
+    end
+    return menu
+end
+
+function hideMenus()
+    if not panel or not menus then return end
+    for _, menu in pairs(menus) do
+        M.Stop(menu)
+        menu:Hide()
+    end
+    panel.catcher:Hide()
+    if type(panel.EnableKeyboard) == "function" then panel:EnableKeyboard(false) end
+end
+
+local function menuOpen()
+    if not menus then return false end
+    for _, menu in pairs(menus) do if menu:IsShown() then return true end end
     return false
 end
 
-local function close()
-    manuallyClosed = true
-    if frame then frame:Hide() end
-end
-
-local function dialog(width_, height_, title)
-    local panel = T.Panel(frame, width_, height_, true)
-    panel:SetPoint("CENTER", frame, "CENTER", 0, 20)
-    panel:SetFrameStrata("FULLSCREEN_DIALOG")
-    panel:SetClampedToScreen(true)
-    panel:SetBackdropBorderColor(unpack(T.trim))
-    local heading = text(panel, 17, T.gold, 20, 15, width_ - 40, 26, nil, true)
-    heading:SetText(title)
-    T.Rule(panel, 1, 52, width_ - 2)
-    panel:Hide()
-    return panel
+function U.HandleEscape()
+    if not panel or not menuOpen() then return false end
+    hideMenus()
+    return true
 end
 
 ---------------------------------------------------------------------------
--- Tooltips
+-- Tooltips and row actions
 ---------------------------------------------------------------------------
 
 local function rowTooltip(row)
     local record, view = row.record, row.view
-    if not record then return end
+    if not record or not view then return end
     local color = classColor(view.classToken)
     GameTooltip:SetOwner(row, "ANCHOR_LEFT")
     GameTooltip:AddLine(A.Text(displayName(record.identity)), color[1], color[2], color[3])
     GameTooltip:AddLine(A.Text(className(view.classToken or "UNKNOWN") .. (view.level and (" · Level " .. view.level) or "") .. " · " .. plural(record.count or 0, "whisper")), 1, 1, 1)
     GameTooltip:AddLine(A.Text("Last whisper " .. ago(record.lastSeenAt) .. " ago · first seen " .. ago(record.firstSeenAt) .. " ago"), .75, .72, .80)
     if record.identity.resolution ~= "exact" then GameTooltip:AddLine("Identity unresolved — unavailable for bulk export.", 1, .65, .4, true) end
-    if record.lastListingEpoch ~= W.GetContext().epoch then GameTooltip:AddLine("Earlier listing — still included in this collection.", 1, .65, .4, true) end
     if view.equipmentAt then GameTooltip:AddLine(A.Text("Equipment snapshot: " .. P.AgeLabel(view.equipmentAt)), .75, .72, .80, true) end
     if view.equipmentState == "partial" then GameTooltip:AddLine("Equipment snapshot is partial.", 1, .65, .4, true) end
     if view.raidsAt and contextID then GameTooltip:AddLine(A.Text("Raid snapshot: " .. P.AgeLabel(view.raidsAt)), .75, .72, .80, true) end
-    if contextID then GameTooltip:AddLine("AVG uses recorded bosses' best parses, matching the saved raid journal.", .75, .72, .80, true) end
-    GameTooltip:AddLine(A.Text(record.lastMessage and ("“" .. record.lastMessage .. "”") or "Preview unavailable after reload."), .88, .86, .91, true)
-    GameTooltip:AddLine("Right-click for actions", .57, .54, .61)
+    if contextID then GameTooltip:AddLine("Avg uses recorded bosses' best parses, matching the saved raid journal.", .75, .72, .80, true) end
+    -- A shared row never had the whisper text; only the leader who received it ever sees that.
+    if record.remote then GameTooltip:AddLine(A.Text("Shared by " .. (record.reporter or "your group's leader")), .88, .86, .91, true)
+    else GameTooltip:AddLine(A.Text(record.lastMessage and ("“" .. record.lastMessage .. "”") or "Preview unavailable after reload."), .88, .86, .91, true) end
+    if not W.IsReadOnly() then GameTooltip:AddLine("Right-click for actions", .57, .54, .61) end
     GameTooltip:Show()
 end
 
----------------------------------------------------------------------------
--- Bulk Search and confirmation dialogs
----------------------------------------------------------------------------
-
-function showCopy()
-    if InCombatLockdown() then A.Print("Bulk URL copying is unavailable during combat."); return end
-    local newlyDimmed = not frame.scrim:IsShown()
-    closeOverlays("copy")
-    local result, reason = P.BuildExport(W.GetRows(), W.GetSelection(), W.GetContext().epoch)
-    if not result then closeOverlays(); A.Print(reason or "No exportable players."); return end
-    if result.count == 0 or #result.urls == 0 then
-        closeOverlays()
-        A.Print("No exportable players. " .. #result.excluded .. " identities are unresolved or unsupported.")
-        return
-    end
-    if not frame.copy then
-        local panel = dialog(480, 292, "Bulk Search")
-        panel.summary = text(panel, 14, T.cream, 20, 68, 440, 22)
-        panel.help = text(panel, 13, T.muted, 20, 96, 440, 40)
-        panel.help:SetMaxLines(2)
-        panel.help:SetText("Press Ctrl+C (Cmd+C on Mac) to copy, then paste the link into your browser.")
-        panel.edit = input(panel, 20, 144, 440)
-        panel.edit:SetMaxLetters(2000)
-        panel.note = text(panel, 13, T.muted, 20, 190, 440, 22)
-        panel.noteArea = CreateFrame("Frame", nil, panel)
-        panel.noteArea:SetPoint("TOPLEFT", 20, -190)
-        panel.noteArea:SetSize(440, 24)
-        panel.previous = Button(panel, "Previous", 100, 32, function() panel:SelectBatch(panel.batch - 1) end)
-        panel.previous:SetPoint("BOTTOMLEFT", 20, 20)
-        panel.next = Button(panel, "Next batch", 118, 32, function() panel:SelectBatch(panel.batch + 1) end)
-        panel.next:SetPoint("LEFT", panel.previous, "RIGHT", 10, 0)
-        local done = Button(panel, "Close", 100, 32, function() panel:Hide() end, "primary")
-        done:SetPoint("BOTTOMRIGHT", -20, 20)
-        function panel:SelectBatch(index)
-            self.batch = math.max(1, math.min(#self.result.urls, index))
-            self.edit:SetText(self.result.urls[self.batch])
-            self.edit:SetFocus()
-            self.edit:HighlightText()
-            self.summary:SetText(plural(self.result.count, "player") .. " · Batch " .. self.batch .. " of " .. #self.result.urls)
-            self.previous:SetAlpha(self.batch > 1 and 1 or .45)
-            self.next:SetAlpha(self.batch < #self.result.urls and 1 or .45)
-        end
-        panel.edit:SetScript("OnTextChanged", function(self)
-            if panel.result and self:GetText() ~= panel.result.urls[panel.batch] then self:SetText(panel.result.urls[panel.batch]) end
-        end)
-        panel.edit:SetScript("OnEscapePressed", function() panel:Hide() end)
-        panel.edit:SetScript("OnEnterPressed", function() panel:Hide() end)
-        panel:SetScript("OnHide", function() M.Stop(panel); panel.edit:ClearFocus(); frame.scrim:Hide() end)
-        panel.noteArea:EnableMouse(true)
-        panel.noteArea:SetScript("OnEnter", function()
-            if not panel.result or #panel.result.excluded == 0 then return end
-            GameTooltip:SetOwner(panel, "ANCHOR_LEFT")
-            GameTooltip:AddLine("Excluded from export", unpack(T.gold))
-            for index, excluded in ipairs(panel.result.excluded) do
-                if index > 10 then GameTooltip:AddLine("Additional exclusions: " .. (#panel.result.excluded - 10)); break end
-                GameTooltip:AddLine(A.Text(excluded.name .. ": " .. excluded.reason), 1, 1, 1, true)
-            end
-            GameTooltip:Show()
-        end)
-        panel.noteArea:SetScript("OnLeave", function() GameTooltip:Hide() end)
-        _G.SoulshardWhisperCopy = panel
-        table.insert(UISpecialFrames, "SoulshardWhisperCopy")
-        frame.copy = panel
-    end
-    local panel = frame.copy
-    panel.result = result
-    panel.note:SetText(#result.excluded .. " excluded · " .. result.earlierCount .. " from earlier listings")
-    frame.scrim:Show()
-    panel:Show()
-    panel:SelectBatch(1)
-    if newlyDimmed then reveal(frame.scrim, 0, M.timing.message, 0) end
-    reveal(panel, 0, M.timing.enter, 8)
-end
-
-function showConfirm()
-    local newlyDimmed = not frame.scrim:IsShown()
-    closeOverlays("confirm")
-    if not frame.confirm then
-        local panel = dialog(440, 212, "Clear roster?")
-        panel.message = text(panel, 14, T.cream, 20, 68, 400, 66)
-        panel.message:SetMaxLines(3)
-        local erase = Button(panel, "Clear roster", 150, 32, function() W.Clear(); panel:Hide(); U.Refresh() end, "danger")
-        erase:SetPoint("BOTTOMLEFT", 20, 20)
-        local cancel = Button(panel, "Cancel", 104, 32, function() panel:Hide() end)
-        cancel:SetPoint("BOTTOMRIGHT", -20, 20)
-        panel:SetScript("OnHide", function() M.Stop(panel); frame.scrim:Hide() end)
-        frame.confirm = panel
-    end
-    frame.confirm.message:SetText("Remove " .. plural(#W.GetRows(), "player") .. " from this roster? Saved profile snapshots and settings are kept.")
-    frame.scrim:Show()
-    frame.confirm:Show()
-    if newlyDimmed then reveal(frame.scrim, 0, M.timing.message, 0) end
-    reveal(frame.confirm, 0, M.timing.enter, 8)
-end
-
----------------------------------------------------------------------------
--- Roster page
----------------------------------------------------------------------------
-
-local function toggleKey(entry)
-    W.ToggleSelection(entry.record.key)
-end
-
--- Row actions. The target is what the sender's own whisper would have carried: a bare name on this
--- realm, otherwise Name-Realm with the spaces Blizzard strips from realm names removed.
+-- The target is what the sender's own whisper would have carried: a bare name on this realm, otherwise
+-- Name-Realm with the spaces Blizzard strips from realm names removed.
 local function chatTarget(identity)
     if type(identity.name) ~= "string" then return nil end
     if not identity.realmName or sameRealm(identity.realmName) then return identity.name end
@@ -616,389 +605,445 @@ local function inviteTo(identity)
     pcall(invite, target)
 end
 
+local function setKeys(keys, selectedState)
+    local selected = W.GetSelection()
+    for _, key in ipairs(keys) do
+        if (selected[key] == true) ~= selectedState then W.ToggleSelection(key) end
+    end
+end
+
 local function openRowMenu(row)
-    local entry, menu = row.entry, frame.rowMenu
-    if not entry or not menu then return end
-    local identity = entry.record.identity
-    local color = classColor(row.view and row.view.classToken)
-    hideMenus()
-    menu.key, menu.identity = entry.record.key, identity
-    menu.title:SetText(A.Text(identity.name or "Unresolved player"))
-    menu.title:SetTextColor(unpack(color))
+    local entry = row.entry
+    if not entry then return end
+    local identity, key = entry.record.identity, entry.record.key
     -- A conflicting identity cannot be trusted as a whisper or invite target.
-    menu.blocked = identity.resolution == "conflicting"
-    menu.whisper:SetAlpha(menu.blocked and .45 or 1)
-    menu.invite:SetAlpha(menu.blocked and .45 or 1)
-    menu:ClearAllPoints()
-    if row.index - offset <= 3 then menu:SetPoint("TOPRIGHT", row, "BOTTOMRIGHT", -14, -2)
-    else menu:SetPoint("BOTTOMRIGHT", row, "TOPRIGHT", -14, 2) end
-    menu:Show()
-    menu.catcher:Show()
-    reveal(menu, 0, M.timing.message, 6)
+    local blocked = identity.resolution == "conflicting"
+    menus.row.key = key
+    menus.row:Open({
+        { title = identity.name or "Unresolved player", color = classColor(row.view and row.view.classToken) },
+        { text = "Whisper", disabled = blocked, onClick = function() whisperTo(identity) end },
+        { text = "Invite to group", disabled = blocked, onClick = function() inviteTo(identity) end },
+        { separator = true },
+        { text = "Remove from roster", danger = true, onClick = function() W.Remove(key); U.Refresh() end },
+    }, row.slotIndex <= 3 and "TOPRIGHT" or "BOTTOMRIGHT", row, row.slotIndex <= 3 and "BOTTOMRIGHT" or "TOPRIGHT", -14, row.slotIndex <= 3 and -2 or 2)
 end
 
 local function clickRow(row, button)
     local entry = row.entry
-    if not entry then return end
+    if not entry or W.IsReadOnly() then return end
     if button == "RightButton" then openRowMenu(row); return end
-    local selected = W.GetSelection()
-    local index = row.index
-    if type(IsShiftKeyDown) == "function" and IsShiftKeyDown() and anchorIndex and views[anchorIndex] then
-        local first, last = math.min(anchorIndex, index), math.max(anchorIndex, index)
-        for position = first, last do
-            local other = views[position]
-            if other and (selected[other.record.key] == true) ~= anchorState then toggleKey(other) end
+    local key = entry.record.key
+    if type(IsShiftKeyDown) == "function" and IsShiftKeyDown() and anchorKey then
+        local from, to
+        for position, other in ipairs(order) do
+            if other == anchorKey then from = position end
+            if other == key then to = position end
         end
-    else
-        toggleKey(entry)
-        anchorIndex, anchorState = index, selected[entry.record.key] == true
+        if from and to then
+            local range = {}
+            for position = math.min(from, to), math.max(from, to) do range[#range + 1] = order[position] end
+            setKeys(range, anchorState)
+            U.Refresh()
+            return
+        end
     end
+    W.ToggleSelection(key)
+    anchorKey, anchorState = key, W.GetSelection()[key] == true
     U.Refresh()
 end
 
-local function createRow(parent, index)
+---------------------------------------------------------------------------
+-- Roster list: class headings and player rows share one pool of slots
+---------------------------------------------------------------------------
+
+local function createPlayerRow(parent)
     local row = CreateFrame("Button", nil, parent)
-    row:SetSize(rowWidth, rowHeight)
-    row:SetPoint("TOPLEFT", 0, -(index - 1) * rowHeight)
-    row.bg = fill(row, 0, 0, rowWidth, rowHeight - 1, T.gold, 1, "BACKGROUND")
-    row.bg:SetAlpha(0)
-    fill(row, 0, rowHeight - 1, rowWidth, 1, T.line, .9, "BORDER")
-    row.stripe = fill(row, 0, 0, 3, rowHeight - 1, T.gold, 1, "ARTWORK")
+    row:SetSize(rowWidth, playerHeight)
     row.box = checkbox(row)
-    row.box:SetPoint("TOPLEFT", 16, -math.floor((rowHeight - 18) / 2))
-    local ringY = (rowHeight - 1 - ringSize) / 2
-    local lower = ringY + ringSize - badgeSize + 4
-    row.ring = T.Disc(row, "TOPLEFT", ringX, -ringY, ringSize, T.line, 1, "BORDER")
-    row.portrait = row:CreateTexture(nil, "ARTWORK")
-    row.portrait:SetSize(portraitSize, portraitSize)
-    row.portrait:SetPoint("TOPLEFT", ringX + (ringSize - portraitSize) / 2, -(ringY + (ringSize - portraitSize) / 2))
-    T.Circle(row, row.portrait)
-    -- Class badge, lower right. Its icon is left out when the portrait itself is the class icon.
-    local badgeX = ringX + ringSize / 2 + 17
-    row.badgeBack = T.Disc(row, "TOPLEFT", badgeX - badgeSize / 2, -lower, badgeSize, T.background, 1, "ARTWORK", 2)
-    row.badge = row:CreateTexture(nil, "ARTWORK", nil, 3)
-    row.badge:SetSize(badgeSize - 5, badgeSize - 5)
-    row.badge:SetPoint("TOPLEFT", badgeX - badgeSize / 2 + 2.5, -(lower + 2.5))
-    T.Circle(row, row.badge)
-    -- Level badge, lower left.
-    local levelX = ringX + ringSize / 2 - 17
-    row.levelBack = T.Disc(row, "TOPLEFT", levelX - badgeSize / 2, -lower, badgeSize, T.background, 1, "ARTWORK", 2)
-    row.level = text(row, 13, T.cream, levelX - badgeSize / 2, lower + 3, badgeSize, 16, "CENTER")
-    local metricWidth = 132
-    row.name = text(row, 15, T.cream, textX, 8, rowWidth - textX - metricWidth - 20, 20)
-    row.preview = text(row, 13, T.muted, textX, 30, rowWidth - textX - metricWidth - 20, 18)
-    row.metric = Label(row, 15, T.gold)
-    row.metric:SetPoint("TOPRIGHT", -14, -8)
-    row.metric:SetSize(metricWidth, 20)
-    row.metric:SetMaxLines(1)
-    row.metric:SetJustifyH("RIGHT")
-    row.sub = Label(row, 13, T.muted)
-    row.sub:SetPoint("TOPRIGHT", -14, -30)
-    row.sub:SetSize(metricWidth, 18)
-    row.sub:SetMaxLines(1)
-    row.sub:SetJustifyH("RIGHT")
-    function row:Paint()
-        -- A row that was just handed to a different player jumps to its state; hover and selection ease.
-        local instant = self.rebound
-        self.rebound = nil
-        ease(self.bg, self.selected and .14 or (self.hovered and .07 or 0), instant)
-        ease(self.stripe, self.selected and 1 or (self.hovered and .7 or .45), instant)
-        self.box:SetState(self.selected and "on" or "off")
-    end
-    function row:SetSelected(selected)
-        self.selected = selected
-        self:Paint()
+    row.icon = row:CreateTexture(nil, "ARTWORK")
+    row.icon:SetSize(16, 16)
+    row.name = Label(row, 14, T.cream)
+    row.name:SetSize(100, 20)
+    row.name:SetMaxLines(1)
+    if row.name.SetWordWrap then row.name:SetWordWrap(false) end
+    row.preview = Label(row, 13, T.muted)
+    row.preview:SetSize(100, 18)
+    row.preview:SetMaxLines(1)
+    if row.preview.SetWordWrap then row.preview:SetWordWrap(false) end
+    for _, spec in ipairs({ { "gs", gsX, gsWidth }, { "avg", avgX, parseWidth }, { "best", bestX, parseWidth } }) do
+        local region = Label(row, 14, T.gold)
+        region:SetPoint("TOPLEFT", spec[2], -5)
+        region:SetSize(spec[3], 20)
+        region:SetMaxLines(1)
+        region:SetJustifyH("RIGHT")
+        row[spec[1]] = region
     end
     row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
     row:SetScript("OnClick", clickRow)
-    row:HookScript("OnEnter", function(self) self.hovered = true; self:Paint(); rowTooltip(self) end)
-    row:HookScript("OnLeave", function(self) self.hovered = false; self:Paint(); GameTooltip:Hide() end)
+    row:HookScript("OnEnter", function(self) rowTooltip(self) end)
+    row:HookScript("OnLeave", function() GameTooltip:Hide() end)
     return row
 end
 
-local function nameText(entry)
-    local identity, record = entry.record.identity, entry.record
+local function createHeading(parent)
+    local head = CreateFrame("Button", nil, parent)
+    head:SetSize(rowWidth, headingHeight)
+    head.select = CreateFrame("Button", nil, head)
+    head.select:SetSize(22, 22)
+    head.select:SetPoint("LEFT", 2, 0)
+    head.box = checkbox(head.select)
+    head.box:SetPoint("CENTER")
+    head.icon = head:CreateTexture(nil, "ARTWORK")
+    head.icon:SetSize(16, 16)
+    head.icon:SetPoint("LEFT", 30, 0)
+    head.name = Label(head, 15, T.cream, true)
+    head.name:SetPoint("LEFT", 52, 0)
+    head.name:SetSize(rowWidth - 52 - 34, 20)
+    head.name:SetMaxLines(1)
+    head.rule = fill(head, 4, headingHeight - 2, rowWidth - 12, 1, T.gold, .6, "ARTWORK")
+    head.fold = foldGlyph(head)
+    head.fold:SetPoint("RIGHT", -8, 0)
+    head:SetScript("OnClick", function(self)
+        if not self.token then return end
+        folded[self.token] = not folded[self.token] or nil
+        U.Refresh()
+    end)
+    head.select:SetScript("OnClick", function(self)
+        local heading = self:GetParent()
+        if not heading.keys or W.IsReadOnly() then return end
+        setKeys(heading.keys, not heading.allSelected)
+        U.Refresh()
+    end)
+    return head
+end
+
+local function createSlot(index)
+    local slot = CreateFrame("Frame", nil, panel.viewport)
+    slot:SetSize(rowWidth, playerHeight)
+    slot.index = index
+    slot.row = createPlayerRow(slot)
+    slot.row.slotIndex = index
+    slot.heading = createHeading(slot)
+    slot:Hide()
+    return slot
+end
+
+-- GearScore and parse columns. Unknown is a dash, never zero.
+local function metrics(row, view, settings)
+    local columns = settings.showSnapshots
+    for _, region in ipairs({ row.gs, row.avg, row.best }) do region:SetShown(columns) end
+    if not columns then return end
+    if view.gearScore ~= nil then
+        local mark = (view.stale or view.equipmentState == "partial") and "*" or ""
+        row.gs:SetText(thousands(view.gearScore) .. mark)
+        row.gs:SetTextColor(unpack(view.stale and T.danger or T.gold))
+    else
+        row.gs:SetText("—")
+        row.gs:SetTextColor(unpack(T.faint))
+    end
+    local parsed = contextID ~= nil and view.raidName ~= nil
+    for _, spec in ipairs({ { row.avg, view.averageParse }, { row.best, view.bestParse } }) do
+        local region, number = spec[1], spec[2]
+        if parsed and number ~= nil then
+            region:SetText(tostring(math.floor(number + .5)))
+            region:SetTextColor(unpack(T.ParseColor(number)))
+        else
+            region:SetText("—")
+            region:SetTextColor(unpack(T.faint))
+        end
+    end
+end
+
+local function nameText(record, view, isNew)
+    local identity = record.identity
     local result = A.Text(identity.name or "Unresolved player")
     if identity.realmName and not sameRealm(identity.realmName) then result = result .. mutedHex .. "-" .. A.Text(identity.realmName) .. "|r" end
-    result = result .. mutedHex .. "  ×" .. (record.count or 0) .. "|r"
+    result = result .. mutedHex .. " (" .. (view.level and tostring(view.level) or "—") .. ")  ×" .. (record.count or 0) .. "|r"
     if identity.resolution ~= "exact" then result = result .. dangerHex .. "  !|r" end
+    if isNew then result = result .. goldHex .. "  NEW|r" end
     return result
 end
 
-local function fullView(entry, settings)
+local function paintPlayer(row, item, settings, selected)
+    local entry = item.entry
+    local record = entry.record
+    local view = entry.view
     if not settings.showSnapshots then
-        return { classToken = entry.view.classToken, level = entry.record.level, raceToken = entry.view.raceToken, sex = entry.view.sex }
+        -- Saved snapshots are off: only what the whisper itself revealed.
+        view = { classToken = entry.view.classToken, level = record.level, raceToken = entry.view.raceToken, sex = entry.view.sex }
+    elseif contextID then
+        entry.full = entry.full or P.Enrich(record, contextID)
+        view = entry.full
     end
-    if not contextID then return entry.view end
-    entry.full = entry.full or P.Enrich(entry.record, contextID)
-    return entry.full
+    local flat = grouping == "none"
+    local boxX = flat and 4 or 20
+    local nameX = flat and boxX + 46 or boxX + 26
+    local token = entry.token
+    local color = classColor(token ~= "UNKNOWN" and token or nil)
+    row.entry, row.record, row.view = entry, record, view
+    row.selected = selected[record.key] == true
+    row.box:ClearAllPoints()
+    row.box:SetPoint("TOPLEFT", boxX, -math.floor((playerHeight - 18) / 2))
+    row.box:SetState(row.selected and "on" or "off")
+    row.box:SetShown(not W.IsReadOnly())
+    row.icon:SetShown(flat)
+    if flat then
+        row.icon:ClearAllPoints()
+        row.icon:SetPoint("TOPLEFT", boxX + 24, -13)
+        T.ClassIcon(row.icon, token ~= "UNKNOWN" and token or nil)
+    end
+    row.name:ClearAllPoints()
+    row.name:SetPoint("TOPLEFT", nameX, -5)
+    row.name:SetWidth((settings.showSnapshots and gsX or rowWidth - columnEdge) - nameX - 6)
+    row.name:SetText(nameText(record, view, not acknowledged[record.key]))
+    row.name:SetTextColor(unpack(color))
+    row.preview:ClearAllPoints()
+    row.preview:SetPoint("TOPLEFT", nameX, -23)
+    row.preview:SetWidth(rowWidth - nameX - columnEdge)
+    row.preview:SetText(A.Text(ago(record.lastSeenAt) .. " · " .. (record.remote and ("Shared by " .. (record.reporter or "your group's leader")) or record.lastMessage or "Preview cleared after reload")))
+    metrics(row, view, settings)
 end
 
--- The portrait is the live picture when the player is in view, else a generic race portrait, else the class icon.
--- A class icon portrait already says the class, so the badge only appears next to a real or race portrait.
-local function paintPortrait(row)
-    local entry, view = row.entry, row.view
-    if not entry or not view then return end
-    local source = A.Portraits.Apply(row.portrait, entry.record.identity, view)
-    row.source = source
-    local badged = source ~= "class" and view.classToken ~= nil
-    row.badgeBack:SetShown(badged)
-    row.badge:SetShown(badged)
-    if badged then T.ClassIcon(row.badge, view.classToken) end
+local function paintHeading(head, item, selected)
+    local color = classColor(item.token ~= "UNKNOWN" and item.token or nil)
+    head.token, head.keys = item.token, item.keys
+    head.select:SetShown(not W.IsReadOnly())
+    head.allSelected = item.selectedCount == #item.keys and #item.keys > 0
+    head.box:SetState(head.allSelected and "on" or (item.selectedCount > 0 and "partial" or "off"))
+    T.ClassIcon(head.icon, item.token ~= "UNKNOWN" and item.token or nil)
+    head.name:SetText(A.Text(className(item.token)) .. mutedHex .. "  (" .. #item.keys .. ")|r")
+    head.name:SetTextColor(unpack(color))
+    head.rule:SetColorTexture(color[1], color[2], color[3], .6)
+    head.fold:SetFolded(folded[item.token] == true)
 end
 
-local function renderRows()
+local function renderList()
     local settings, selected = W.GetSettings(), W.GetSelection()
-    local epoch = W.GetContext().epoch
-    local fresh = frame.fresh
-    for index, row in ipairs(frame.rows) do
-        local entry = views[offset + index]
-        local previousKey = row.record and row.record.key
-        row:SetShown(entry ~= nil)
-        row.entry, row.record, row.index = entry, entry and entry.record, offset + index
-        if entry then
-            local record = entry.record
-            row.rebound = previousKey ~= record.key
-            local view = fullView(entry, settings)
-            local token = view.classToken
-            local color = classColor(token)
-            row.view = view
-            row.ring:SetColorTexture(color[1], color[2], color[3], token and .9 or .35)
-            row.stripe:SetColorTexture(color[1], color[2], color[3], 1)
-            row.level:SetText(view.level and tostring(view.level) or "")
-            row.levelBack:SetShown(view.level ~= nil)
-            paintPortrait(row)
-            row.name:SetText(nameText(entry))
-            row.name:SetTextColor(unpack(color))
-            row.preview:SetText(A.Text(ago(record.lastSeenAt) .. " · " .. (record.lastMessage or "Preview cleared after reload")))
-            local metric, sub, subColor = "", "", T.muted
-            if settings.showSnapshots then
-                if view.gearScore ~= nil then
-                    metric = value(view.gearScore) .. " GS" .. (view.equipmentState == "partial" and "*" or "")
-                    if contextID and view.raidName and (view.averageParse ~= nil or view.bestParse ~= nil) then
-                        sub = value(view.averageParse) .. " avg · " .. value(view.bestParse) .. " best"
-                    elseif contextID then sub = "No raid data"
-                    else sub = "saved " .. ago(view.equipmentAt or view.raidsAt) end
-                    if view.stale then subColor = T.danger end
-                else
-                    metric = "—"
-                    if contextID and view.raidName and (view.averageParse ~= nil or view.bestParse ~= nil) then
-                        sub = value(view.averageParse) .. " avg · " .. value(view.bestParse) .. " best"
-                        if view.stale then subColor = T.danger end
-                    else sub = "No snapshot" end
+    local used, shown = 0, 0
+    for _, slot in ipairs(panel.slots) do
+        local item = items[offset + shown + 1]
+        if item and used + item.height <= viewportHeight then
+            shown = shown + 1
+            slot:ClearAllPoints()
+            slot:SetPoint("TOPLEFT", 0, -used)
+            slot:SetHeight(item.height)
+            slot.item = item
+            if item.kind == "heading" then
+                slot.row:Hide()
+                slot.row.entry, slot.row.record = nil, nil
+                slot.heading:ClearAllPoints()
+                slot.heading:SetPoint("BOTTOMLEFT", 0, 0)
+                slot.heading:Show()
+                paintHeading(slot.heading, item, selected)
+            else
+                slot.heading:Hide()
+                slot.row:ClearAllPoints()
+                slot.row:SetPoint("TOPLEFT", 0, 0)
+                slot.row:Show()
+                paintPlayer(slot.row, item, settings, selected)
+            end
+            slot:Show()
+            used = used + item.height
+        else
+            slot.item = nil
+            slot.row.entry, slot.row.record = nil, nil
+            slot:Hide()
+        end
+    end
+    panel.shownCount = shown
+    local overflow = maxOffset > 0
+    panel.scrollbar:SetShown(overflow)
+    panel.syncing = true
+    panel.scrollbar:SetMinMaxValues(0, maxOffset)
+    panel.scrollbar:SetValue(offset)
+    panel.syncing = false
+    local track = viewportHeight
+    panel.thumb:SetSize(trackWidth, math.max(28, math.floor(track * math.max(1, shown) / math.max(math.max(1, shown), #items))))
+end
+
+local function setOffset(value)
+    value = math.max(0, math.min(maxOffset, math.floor(value + .5)))
+    if value == offset then return end
+    offset = value
+    if panel and panel:IsVisible() then renderList() end
+end
+
+-- Class sections in a fixed order (empty classes are skipped), or one flat list. Newest whisper first inside either.
+local function buildItems()
+    items, order = {}, {}
+    if grouping == "none" then
+        for _, entry in ipairs(entries) do
+            items[#items + 1] = { kind = "player", entry = entry, height = playerHeight }
+            order[#order + 1] = entry.record.key
+        end
+    else
+        local byClass = {}
+        for _, entry in ipairs(entries) do
+            byClass[entry.token] = byClass[entry.token] or {}
+            table.insert(byClass[entry.token], entry)
+        end
+        local selected = W.GetSelection()
+        for _, token in ipairs(classOrder) do
+            local list = byClass[token]
+            if list then
+                local keys, count = {}, 0
+                for _, entry in ipairs(list) do
+                    keys[#keys + 1] = entry.record.key
+                    if selected[entry.record.key] then count = count + 1 end
+                end
+                items[#items + 1] = {
+                    kind = "heading", token = token, keys = keys, selectedCount = count,
+                    height = headingHeight + (#items > 0 and sectionGap or 0),
+                }
+                if not folded[token] then
+                    for _, entry in ipairs(list) do
+                        items[#items + 1] = { kind = "player", entry = entry, height = playerHeight }
+                        order[#order + 1] = entry.record.key
+                    end
                 end
             end
-            row.metric:SetText(A.Text(metric))
-            row.metric:SetTextColor(unpack(metric == "—" and T.muted or T.gold))
-            row.sub:SetText(A.Text(sub))
-            row.sub:SetTextColor(unpack(subColor))
-            local earlier = record.lastListingEpoch ~= epoch
-            for _, region in ipairs({ row.name, row.preview, row.metric, row.sub, row.level }) do region:SetAlpha(earlier and .6 or 1) end
-            for _, region in ipairs({ row.ring, row.portrait, row.badgeBack, row.badge, row.levelBack }) do region:SetAlpha(earlier and .6 or 1) end
-            row:SetSelected(selected[record.key] == true)
-            if fresh and fresh[record.key] then reveal(row, 0, M.timing.row, 8) end
         end
     end
-    local overflow = math.max(0, #views - visibleRows)
-    frame.scrollbar:SetShown(overflow > 0)
-    syncing = true
-    frame.scrollbar:SetMinMaxValues(0, overflow)
-    frame.scrollbar:SetValue(offset)
-    syncing = false
-    local track = visibleRows * rowHeight - 2
-    frame.thumb:SetSize(trackWidth, math.max(28, math.floor(track * visibleRows / math.max(visibleRows, #views))))
-end
-
--- Repaint only the portraits: joining the group or targeting a player can give a row a live picture without anything else changing.
-function U.RepaintPortraits()
-    if not frame or not frame:IsShown() or currentTab ~= "roster" then return end
-    for _, row in ipairs(frame.rows) do
-        if row:IsShown() then paintPortrait(row) end
+    -- The largest offset still showing the last item; scrolling stops there.
+    local used, count = 0, 0
+    for index = #items, 1, -1 do
+        used = used + items[index].height
+        if used > viewportHeight then break end
+        count = count + 1
     end
-end
-
-local function setOffset(value_)
-    local maximum = math.max(0, #views - visibleRows)
-    value_ = math.max(0, math.min(maximum, math.floor(value_ + .5)))
-    if value_ == offset then return end
-    offset = value_
-    if frame and frame:IsShown() then renderRows() end
-end
-
-local function sortViews(list, settings)
-    if sortKey == "recent" then return end
-    local scored = {}
-    if sortKey == "score" then
-        for _, entry in ipairs(list) do
-            local source = (contextID and settings.showSnapshots) and fullView(entry, settings) or entry.view
-            scored[entry] = contextID and settings.showSnapshots and (source.averageParse or source.bestParse) or source.gearScore
-        end
-    end
-    table.sort(list, function(left, right)
-        if sortKey == "name" then
-            local a, b = (strlower or string.lower)(left.display), (strlower or string.lower)(right.display)
-            if a ~= b then return a < b end
-        else
-            local a, b = scored[left], scored[right]
-            if a ~= b then
-                if a == nil then return false end
-                if b == nil then return true end
-                return a > b
-            end
-        end
-        return left.order < right.order
-    end)
-end
-
--- Lays out whatever the empty state shows as one block, centred in the list area and a little above the
--- middle: logo, title, body, then the reset button when a filter hides everyone.
-local function layoutEmpty(empty, hasReset)
-    local bodyWidth = rowWidth - 112
-    local bodyHeight
-    if type(empty.body.GetStringHeight) == "function" then
-        -- Measure with room to spare so the text is never clipped, then fit the box to it.
-        empty.body:SetSize(bodyWidth, 80)
-        bodyHeight = math.max(20, math.ceil(empty.body:GetStringHeight()) + 2)
-    else
-        bodyHeight = 20 * math.max(1, math.ceil(#(empty.body:GetText() or "") / 52))
-    end
-    local total = 52 + 16 + 24 + 6 + bodyHeight + (hasReset and 20 + 32 or 0)
-    local y = math.max(16, math.floor((visibleRows * rowHeight - total) / 2) - 8)
-    empty.logo:ClearAllPoints()
-    empty.logo:SetPoint("TOP", 0, -y)
-    y = y + 52 + 16
-    empty.title:ClearAllPoints()
-    empty.title:SetPoint("TOPLEFT", 24, -y)
-    y = y + 24 + 6
-    empty.body:ClearAllPoints()
-    empty.body:SetPoint("TOPLEFT", 56, -y)
-    empty.body:SetSize(bodyWidth, bodyHeight)
-    y = y + bodyHeight
-    if hasReset then
-        empty.reset:ClearAllPoints()
-        empty.reset:SetPoint("TOP", 0, -(y + 20))
-    end
-end
-
-local function emptyState(status, total, hidden, state, tone)
-    local empty = frame.empty
-    local title, body = "", ""
-    if total > 0 then
-        title = "No players match"
-        body = plural(hidden, "player") .. " hidden by the class filter."
-    elseif state == "recording" then
-        title = "Listening for whispers"
-        body = "Players who whisper you about your listing will appear here, with their saved GearScore when the archive knows them."
-    else
-        local _, headline, detail = describe(status)
-        title = headline == "Paused" and "Collection paused" or (headline == "Off" and "Collection is off" or "Collection unavailable")
-        body = pausedCopy[state] or detail
-    end
-    empty.title:SetText(A.Text(title))
-    empty.title:SetTextColor(unpack(total > 0 and T.cream or (tone == "bad" and T.danger or T.gold)))
-    empty.body:SetText(A.Text(body))
-    empty.reset:SetShown(total > 0)
-    layoutEmpty(empty, total > 0)
-    empty:SetShown(true)
-end
-
-function refreshRoster(settings, status)
-    local records, selected = W.GetRows(), W.GetSelection()
-    local epoch = W.GetContext().epoch
-    local list, counts = {}, { ALL = 0 }
-    local whispers, selectedCount, earlier = 0, 0, 0
-    for index, record in ipairs(records) do
-        whispers = whispers + (record.count or 0)
-        if selected[record.key] then selectedCount = selectedCount + 1 end
-        if record.lastListingEpoch ~= epoch then earlier = earlier + 1 end
-        local display = displayName(record.identity)
-        local view = P.Enrich(record)
-        local token = view.classToken or "UNKNOWN"
-        counts.ALL = counts.ALL + 1
-        counts[token] = (counts[token] or 0) + 1
-        if classFilter == "ALL" or classFilter == token then list[#list + 1] = { record = record, view = view, display = display, order = index } end
-    end
-    sortViews(list, settings)
-    views = list
-    if anchorIndex and not views[anchorIndex] then anchorIndex = nil end
-    offset = math.max(0, math.min(offset, math.max(0, #views - visibleRows)))
-    frame.counts = counts
-
-    frame.bulk.label:SetText(selectedCount > 0 and ("Bulk Search Selected (" .. selectedCount .. ")") or ("Bulk Search (" .. #records .. ")"))
-    frame.clear:SetAlpha(#records > 0 and 1 or .45)
-    local players = #views ~= #records and (#views .. " of " .. plural(#records, "player")) or plural(#records, "player")
-    frame.count:SetText(players .. "\n" .. plural(whispers, "whisper"))
-
-    for _, token in ipairs(classes) do
-        local chip = frame.chips[token]
-        local count = counts[token] or 0
-        local active = classFilter == token
-        chip.count:SetText(count > 0 and tostring(count) or "")
-        chip.count:SetTextColor(unpack(active and T.gold or T.muted))
-        chip.icon:SetAlpha((count > 0 or active) and 1 or .3)
-        chip.icon:SetDesaturated(count == 0 and not active)
-        chip.active = active
-        if token == "ALL" then
-            -- Chosen, "All" is a solid gold disc with dark type; otherwise a faint gold tint with gold type.
-            chip.icon:SetColorTexture(T.gold[1], T.gold[2], T.gold[3], active and 1 or .18)
-            chip.all:SetTextColor(unpack(active and T.background or T.gold))
-        end
-        -- Resting ring: the class colour when anyone of that class is on the roster, otherwise the dim line colour.
-        chip.restColor = count > 0 and ((token == "ALL" or token == "UNKNOWN") and T.muted or classColor(token)) or T.line
-        chip.ring:SetColorTexture(unpack(active and T.gold or (chip.hovered and T.muted or chip.restColor)))
-        chip.ring:SetAlpha(active and 1 or (count > 0 and .85 or .6))
-    end
-
-    local shownSelected = 0
-    for _, entry in ipairs(views) do if selected[entry.record.key] then shownSelected = shownSelected + 1 end end
-    frame.selectAll.box:SetState(#views > 0 and shownSelected == #views and "on" or (shownSelected > 0 and "partial" or "off"))
-    local hiddenSelected = selectedCount - shownSelected
-    frame.selectAll.label:SetText(selectedCount > 0 and (selectedCount .. " selected" .. (hiddenSelected > 0 and (" · " .. hiddenSelected .. " hidden") or "")) or (#views == 0 and "Nothing to select" or ("Select " .. (#views == #records and "all" or "shown") .. " (" .. #views .. ")")))
-    frame.selectAll.label:SetTextColor(unpack(selectedCount > 0 and T.gold or T.muted))
-    local parseMode = contextID ~= nil and settings.showSnapshots
-    frame.sortButtons.score.label:SetText(parseMode and "Parse" or "GearScore")
-    for _, key in ipairs(sorts) do frame.sortButtons[key]:SetActive(sortKey == key) end
-
-    local contextLabel = "Raid parses"
-    for _, context in ipairs(P.Contexts()) do if context.id == contextID then contextLabel = context.name end end
-    frame.contextButton.label:SetText(A.Text(contextLabel))
-    frame.contextButton:SetSelected(contextID ~= nil)
-    for index, button in ipairs(frame.contextMenu.buttons) do
-        local choice = frame.contextMenu.choices[index]
-        button:SetSelected((choice.id or nil) == contextID)
-    end
-    if frame.rowMenu:IsShown() then
-        local alive = false
-        for _, record in ipairs(records) do if record.key == frame.rowMenu.key then alive = true end end
-        if not alive then hideMenus() end
-    end
-
-    local filtered = classFilter ~= "ALL"
-    if status.overflowCount and status.overflowCount > 0 then frame.message:SetText("Collection full — new players are skipped.")
-    elseif earlier > 0 then frame.message:SetText(plural(earlier, "player") .. " from earlier listings (dimmed). Clear the roster to start fresh.")
-    elseif filtered then frame.message:SetText("Filters only change the view. Bulk Search uses everyone, or your selection.")
-    else frame.message:SetText("Click a row to select; Shift-click for a range; right-click for actions.") end
-
-    local tone, _, _ = describe(status)
-    if #views == 0 then emptyState(status, #records, #records - #views, status.state, tone)
-    else frame.empty:Hide() end
-    -- Players who arrived since the last paint fade in; the first paint after opening has nothing to compare with.
-    frame.fresh = nil
-    local known, current = frame.knownKeys, {}
-    for _, record in ipairs(records) do
-        current[record.key] = true
-        if known and not known[record.key] then
-            frame.fresh = frame.fresh or {}
-            frame.fresh[record.key] = true
-        end
-    end
-    frame.knownKeys = current
-    renderRows()
-    frame.fresh = nil
+    maxOffset = math.max(0, #items - count)
+    offset = math.max(0, math.min(offset, maxOffset))
 end
 
 ---------------------------------------------------------------------------
--- Settings page
+-- Empty and paused states
+---------------------------------------------------------------------------
+
+local function layoutEmpty(empty, withButton)
+    local bodyWidth = 252
+    local bodyHeight
+    if type(empty.body.GetStringHeight) == "function" then
+        empty.body:SetSize(bodyWidth, 90)
+        bodyHeight = math.max(18, math.ceil(empty.body:GetStringHeight()) + 2)
+    else
+        bodyHeight = 18 * math.max(1, math.ceil(#(empty.body:GetText() or "") / 34))
+    end
+    local total = 44 + 12 + 22 + 6 + bodyHeight + (withButton and 12 + 24 or 0)
+    local y = math.max(12, math.floor((viewportHeight - total) / 2) - 6)
+    empty.logo:ClearAllPoints()
+    empty.logo:SetPoint("TOP", 0, -y)
+    y = y + 44 + 12
+    empty.title:ClearAllPoints()
+    empty.title:SetPoint("TOPLEFT", 12, -y)
+    y = y + 22 + 6
+    empty.body:ClearAllPoints()
+    empty.body:SetPoint("TOPLEFT", (rowWidth - bodyWidth) / 2, -y)
+    empty.body:SetSize(bodyWidth, bodyHeight)
+    y = y + bodyHeight + 12
+    empty.create:ClearAllPoints()
+    empty.create:SetPoint("TOP", 0, -y)
+end
+
+local function paintEmpty(status)
+    local empty = panel.empty
+    local _, headline, detail = describe(status)
+    local title, body
+    if status.state == "recording" then
+        title = "Listening for whispers"
+        body = "Players who whisper you about your listing appear here" .. (grouping == "class" and ", grouped by class." or ", newest first.")
+    elseif status.state == "not-grouped" then
+        title, body = "Not in a group", pausedCopy[status.state]
+    elseif status.state == "viewing" then
+        title, body = "No sign-ups shared yet", pausedCopy[status.state]
+    else
+        title = headline == "Off" and "Collection is off" or (headline == "Paused" and "Collection paused" or "Collection unavailable")
+        body = pausedCopy[status.state] or detail
+    end
+    empty.title:SetText(A.Text(title))
+    empty.title:SetTextColor(unpack(status.state == "recording" and T.cream or (describe(status) == "bad" and T.danger or T.cream)))
+    empty.body:SetText(A.Text(body))
+    local withButton = status.state == "not-listed"
+    empty.create:SetShown(withButton)
+    layoutEmpty(empty, withButton)
+    empty:Show()
+end
+
+---------------------------------------------------------------------------
+-- Panel refresh
+---------------------------------------------------------------------------
+
+local function paintBanner(status, players, whispers)
+    local tone, title, detail = describe(status)
+    local color = tones[tone]
+    local banner = panel.banner
+    banner.lamp:SetColorTexture(color[1], color[2], color[3], 1)
+    banner.status:SetText(A.Text(title))
+    banner.status:SetTextColor(unpack(color))
+    banner.count:SetText(plural(players, "player") .. " · " .. plural(whispers, "whisper"))
+    if status.state == "recording" then
+        local _, raid = effectiveContext()
+        if raid then detail = "Collecting for " .. raid.name .. "." end
+    end
+    banner.detail:SetText(A.Text(detail))
+    banner.label, banner.reason = status.label, status.reason
+end
+
+local function paintControls(status, settings, total, selectedCount)
+    local _, raid, reason = effectiveContext()
+    local value
+    if choice == nil then
+        value = goldHex .. "Auto|r" .. mutedHex .. " · |r" .. (raid and A.Text(raid.name) or (mutedHex .. reason .. "|r"))
+    elseif choice == false then value = "No raid parses"
+    else value = A.Text(raidName(choice)) end
+    panel.raidButton.value:SetText(value)
+    panel.viewButton.value:SetText(grouping == "class" and "Group by class" or "No grouping")
+    local box = panel.selectAll.box
+    box:SetState(total > 0 and selectedCount == total and "on" or (selectedCount > 0 and "partial" or "off"))
+    panel.selectAll.label:SetText(selectedCount > 0 and (selectedCount .. " selected") or (total == 0 and "Nothing to select" or ("Select all (" .. total .. ")")))
+    panel.selectAll.label:SetTextColor(unpack(selectedCount > 0 and T.gold or T.muted))
+    for _, caption in ipairs({ panel.captions.gs, panel.captions.avg, panel.captions.best }) do caption:SetShown(settings.showSnapshots) end
+    panel.bulk:SetText(selectedCount > 0 and ("Bulk Search Selected (" .. selectedCount .. ")") or ("Bulk Search (" .. total .. ")"))
+    setEnabled(panel.bulk, total > 0)
+    -- A viewer sees the roster; choosing, exporting and removing are for the people who run the group.
+    local readOnly = W.IsReadOnly()
+    panel.selectAll:SetShown(not readOnly)
+    panel.bulk:SetShown(not readOnly)
+end
+
+function U.Refresh()
+    if not initialized then return end
+    local records = W.GetRows()
+    if tab then
+        tab:SetText(#records > 0 and ("Whispers (" .. #records .. ")") or "Whispers")
+        if tab.Resize then tab:Resize() end
+    end
+    if not panel or not panel:IsVisible() then return end
+    local settings, status, selected = W.GetSettings(), W.GetStatus(), W.GetSelection()
+    contextID = effectiveContext()
+    entries = {}
+    local whispers, selectedCount = 0, 0
+    for _, record in ipairs(records) do
+        whispers = whispers + (record.count or 0)
+        if selected[record.key] then selectedCount = selectedCount + 1 end
+        local view = P.Enrich(record)
+        entries[#entries + 1] = { record = record, view = view, token = view.classToken or "UNKNOWN" }
+    end
+    paintBanner(status, #records, whispers)
+    paintControls(status, settings, #records, selectedCount)
+    buildItems()
+    if #entries == 0 then paintEmpty(status) else panel.empty:Hide() end
+    panel.viewport:SetShown(#entries > 0)
+    renderList()
+    if menus.row:IsShown() then
+        local alive = false
+        for _, record in ipairs(records) do if record.key == menus.row.key then alive = true end end
+        if not alive then hideMenus() end
+    end
+    if panel.settings and panel.settings:IsShown() then panel.settings:Sync(false) end
+end
+
+---------------------------------------------------------------------------
+-- Settings pop-up
 ---------------------------------------------------------------------------
 
 local function parseKeywords(source)
@@ -1018,6 +1063,57 @@ local function filterDirty(page)
     return false
 end
 
+-- Row with a check box, a title and an optional one-line description.
+local function option(parent, x, y, w, title, description, onClick)
+    local row = CreateFrame("Button", nil, parent)
+    row:SetSize(w, description and 40 or 26)
+    row:SetPoint("TOPLEFT", x, -y)
+    row.box = checkbox(row)
+    row.box:SetPoint("TOPLEFT", 0, -1)
+    row.title = text(row, 14, T.cream, 28, 0, w - 28, 22)
+    row.title:SetText(title)
+    if description then
+        row.description = text(row, 13, T.muted, 28, 21, w - 28, 18)
+        row.description:SetText(description)
+    end
+    function row:SetChecked(checked)
+        self.checked = checked
+        self.box:SetState(checked and "on" or "off")
+    end
+    row:SetScript("OnClick", onClick)
+    row:SetScript("OnEnter", function(self) self.title:SetTextColor(unpack(T.gold)) end)
+    row:SetScript("OnLeave", function(self) self.title:SetTextColor(unpack(T.cream)) end)
+    return row
+end
+
+-- A pop-up with a title, a rule and a close button. `beside` puts it to the right of the Group Finder instead of over it.
+local function dialog(globalName, width, height, title, beside)
+    local box = T.Panel(panel, width, height, true)
+    if beside then box:SetPoint("TOPLEFT", panel, "TOPLEFT", popupLeft, -popupTop)
+    else box:SetPoint("CENTER", panel, "TOP", 0, -232) end
+    box:SetFrameStrata("FULLSCREEN_DIALOG")
+    box:SetClampedToScreen(true)
+    box:SetBackdropBorderColor(unpack(T.trim))
+    box:EnableMouse(true)
+    text(box, 16, T.gold, 0, 12, width, 24, "CENTER", true):SetText(title)
+    T.Rule(box, 1, 44, width - 2)
+    box.close = T.Button(box, "×", 24, 24, function() box:Hide() end)
+    box.close:SetPoint("TOPRIGHT", -10, -10)
+    box:SetScript("OnHide", function(self)
+        M.Stop(self)
+        if self.closed then self:closed() end
+        local other = false
+        for _, name in ipairs({ "settings", "copy" }) do
+            if panel[name] and panel[name] ~= self and panel[name]:IsShown() then other = true end
+        end
+        if not other then panel.scrim:Hide() end
+    end)
+    box:Hide()
+    _G[globalName] = box
+    table.insert(UISpecialFrames, globalName)
+    return box
+end
+
 local function paintFilter(page)
     for _, mode in ipairs(modes) do page.modeButtons[mode]:SetSelected(page.mode == mode) end
     page.help:SetText(modeHelp[page.mode])
@@ -1029,102 +1125,77 @@ local function paintFilter(page)
     page.matchAllOption:SetShown(page.mode == "keywords")
     page.caseOption:SetShown(page.mode ~= "any")
     page.caseOption:ClearAllPoints()
-    page.caseOption:SetPoint("TOPLEFT", page.mode == "keywords" and 256 or 16, -180)
-    -- "Any whisper" has no inputs, so its card is shorter and the Display card follows it up.
-    local filterHeight = page.mode == "any" and 218 or 262
-    page.filterCard:SetHeight(filterHeight)
-    page.displayCard:ClearAllPoints()
-    page.displayCard:SetPoint("TOPLEFT", 0, -(188 + filterHeight + 8))
+    page.caseOption:SetPoint("TOPLEFT", page.mode == "keywords" and 176 or 16, -346)
     page.matchAllOption:SetChecked(page.matchAll)
     page.caseOption:SetChecked(page.caseSensitive)
     local dirty = filterDirty(page)
     page.dirty = dirty
-    page.save.label:SetText(dirty and "Save filter" or "Saved")
-    page.save:SetAlpha(dirty and 1 or .45)
-    page.status:SetText(dirty and page.message:GetText() == "" and "Unsaved changes" or "")
+    setEnabled(page.save, dirty)
+    page.status:SetText(dirty and (page.message:GetText() or "") == "" and "Unsaved changes" or "")
 end
 
-local function createSettings(parent)
-    local page = CreateFrame("Frame", nil, parent)
-    page:SetPoint("TOPLEFT", gutter, -pageTop)
-    page:SetSize(inner, settingsHeight)
-    local pad = 16
-    local contentWidth = inner - pad * 2
-    page.cards = {}
-
-    local collection = card(page, 0, 180, "COLLECTION")
-    page.cards[1] = collection
-    page.toggles = {}
-    local fields = {
-        { "enabled", "Collect while eligible", "Record whispers while you lead a listed group." },
-        { "autoShow", "Show beside Looking For Group", "Open this window together with the Group Finder." },
-    }
-    for index, field in ipairs(fields) do
-        local key = field[1]
-        local row = option(collection, pad, 48 + (index - 1) * 46, contentWidth, field[2], field[3], function()
-            W.UpdateSettings({ [key] = not W.GetSettings()[key] })
-            U.Refresh()
-        end)
-        page.toggles[index] = { button = row, key = key }
-    end
-    text(collection, 14, T.cream, pad, 149, 200, 22):SetText("Keep the roster")
-    page.retention = {}
-    for index, choice in ipairs({ { "24h", "24 hours", 112 }, { "session", "This session", 128 } }) do
-        local button = Button(collection, choice[2], choice[3], 30, function()
-            W.UpdateSettings({ retention = choice[1] })
-            U.Refresh()
-        end)
-        button:SetPoint("TOPRIGHT", index == 1 and -(pad + 128 + 8) or -pad, -144)
-        page.retention[choice[1]] = button
-    end
-
-    local filter = card(page, 188, 262, "CAPTURE FILTER")
-    page.cards[2] = filter
-    page.filterCard = filter
+local function createSettings()
+    local page = dialog("SoulshardWhisperSettings", 324, 456, "Whisper Collector", true)
+    local pad, contentWidth = 16, 292
     page.mode, page.matchAll, page.caseSensitive = "any", false, false
+
+    text(page, 13, T.muted, pad, 56, contentWidth, 18):SetText("COLLECTION")
+    page.collect = option(page, pad, 78, contentWidth, "Collect while eligible", "Records whispers as leader or raid assistant.", function()
+        W.UpdateSettings({ enabled = not W.GetSettings().enabled })
+        U.Refresh()
+    end)
+    text(page, 14, T.cream, pad, 130, 140, 22):SetText("Keep the roster")
+    page.retention = {}
+    for index, spec in ipairs({ { "24h", "24 hours", 92 }, { "session", "This session", 100 } }) do
+        local button = T.Button(page, spec[2], spec[3], 26, function()
+            W.UpdateSettings({ retention = spec[1] })
+            U.Refresh()
+        end)
+        button:SetPoint("TOPRIGHT", index == 1 and -(pad + 100 + 8) or -pad, -126)
+        page.retention[spec[1]] = button
+    end
+    page.snapshots = option(page, pad, 164, contentWidth, "Show saved GearScore and parses", "Read from the installed data pack.", function()
+        W.UpdateSettings({ showSnapshots = not W.GetSettings().showSnapshots })
+        U.Refresh()
+    end)
+
+    text(page, 13, T.muted, pad, 214, contentWidth, 18):SetText("CAPTURE FILTER")
     page.modeButtons = {}
-    local gap = 8
-    local segment = math.floor((contentWidth - gap * 2) / 3)
+    local segment = math.floor((contentWidth - 16) / 3)
     for index, mode in ipairs(modes) do
-        local button = Button(filter, modeNames[mode], segment, 30, function()
+        local button = T.Button(page, modeNames[mode], segment, 26, function()
             page.mode = mode
             page.message:SetText("")
             paintFilter(page)
         end)
-        button:SetPoint("TOPLEFT", pad + (index - 1) * (segment + gap), -48)
+        button:SetPoint("TOPLEFT", pad + (index - 1) * (segment + 8), -236)
         page.modeButtons[mode] = button
     end
-    page.help = text(filter, 13, T.muted, pad, 88, contentWidth, 20)
-    page.keywordsLabel = text(filter, 13, T.muted, pad, 116, contentWidth, 20)
+    page.help = text(page, 13, T.muted, pad, 268, contentWidth, 20)
+    page.keywordsLabel = text(page, 13, T.muted, pad, 292, contentWidth, 20)
     page.keywordsLabel:SetText("Keywords (comma-separated, literal text)")
-    page.keywords = input(filter, pad, 138, contentWidth, "For example: invite, healer")
-    page.prefixLabel = text(filter, 13, T.muted, pad, 116, contentWidth, 20)
+    page.keywords = input(page, pad, 312, contentWidth, "For example: invite, healer")
+    page.prefixLabel = text(page, 13, T.muted, pad, 292, contentWidth, 20)
     page.prefixLabel:SetText("Starts with (literal text)")
-    page.prefix = input(filter, pad, 138, contentWidth, "For example: +")
-    for _, edit in ipairs({ page.keywords, page.prefix }) do
-        edit.changed = function() page.message:SetText(""); paintFilter(page) end
-        edit:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+    page.prefix = input(page, pad, 312, contentWidth, "For example: +")
+    for _, box in ipairs({ page.keywords, page.prefix }) do
+        box.changed = function() page.message:SetText(""); paintFilter(page) end
     end
-    page.matchAllOption = option(filter, pad, 180, 220, "Match all keywords", nil, function()
+    page.anyNote = text(page, 13, T.muted, pad, 296, contentWidth, 42)
+    page.anyNote:SetMaxLines(2)
+    if page.anyNote.SetWordWrap then page.anyNote:SetWordWrap(true) end
+    page.anyNote:SetText("Filters apply to future whispers only. Players already in the roster stay there.")
+    page.matchAllOption = option(page, pad, 346, 150, "Match all keywords", nil, function()
         page.matchAll = not page.matchAll
         paintFilter(page)
     end)
-    page.caseOption = option(filter, pad + 240, 180, 190, "Case-sensitive", nil, function()
+    page.caseOption = option(page, 176, 346, 130, "Case-sensitive", nil, function()
         page.caseSensitive = not page.caseSensitive
         paintFilter(page)
     end)
-    page.anyNote = text(filter, 13, T.muted, pad, 120, contentWidth, 42)
-    page.anyNote:SetMaxLines(2)
-    page.anyNote:SetText("Filters apply to future whispers only. Players already in the roster stay there.")
-    page.status = text(filter, 13, T.gold, pad, 0, 140, 20)
-    page.message = text(filter, 13, T.danger, pad, 0, 280, 20)
-    page.message:SetMaxLines(1)
-    -- Both sit on the Save button's line, which rides the bottom edge of the card.
-    for _, label in ipairs({ page.status, page.message }) do
-        label:ClearAllPoints()
-        label:SetPoint("BOTTOMLEFT", pad, 20)
-    end
-    page.save = Button(filter, "Saved", 140, 32, function()
+    page.status = text(page, 13, T.gold, pad, 384, 150, 20)
+    page.message = text(page, 13, T.danger, pad, 384, 150, 20)
+    page.save = redButton(page, "Save filter", 130, 24, function()
         if not page.dirty then return end
         local keywords = page.mode == "keywords" and parseKeywords(page.keywords:GetText()) or W.GetSettings().keywords
         local prefix = page.mode == "prefix" and page.prefix:GetText() or W.GetSettings().prefix
@@ -1135,400 +1206,222 @@ local function createSettings(parent)
         page.message:SetTextColor(unpack(ok and T.good or T.danger))
         page.message:SetText(ok and "Filter saved." or A.Text(reason))
         paintFilter(page)
-    end, "primary")
-    page.save:SetPoint("BOTTOMRIGHT", -pad, 14)
-
-    local display = card(page, 458, 140, "DISPLAY")
-    page.cards[3] = display
-    page.displayCard = display
-    page.displayToggles = {}
-    local displayFields = {
-        { "showSnapshots", "Show saved snapshots", "GearScore and raid parses from installed data." },
-        { "animate", "Animate window", "Fade and slide the window in as it opens and changes pages." },
-    }
-    for index, field in ipairs(displayFields) do
-        local key = field[1]
-        local row = option(display, pad, 48 + (index - 1) * 46, contentWidth, field[2], field[3], function()
-            W.UpdateSettings({ [key] = not W.GetSettings()[key] })
-            U.Refresh()
-        end)
-        page.displayToggles[index] = { button = row, key = key }
-    end
-    page:Hide()
-    return page
-end
-
--- Copies saved values into the page. The filter draft is only replaced when it is clean.
-local function syncSettings(force)
-    local page, settings = frame.settings, W.GetSettings()
-    for _, toggle in ipairs(page.toggles) do toggle.button:SetChecked(settings[toggle.key]) end
-    for _, toggle in ipairs(page.displayToggles) do toggle.button:SetChecked(settings[toggle.key]) end
-    for key, button in pairs(page.retention) do button:SetSelected(settings.retention == key) end
-    if force or not page.dirty then
-        page.mode, page.matchAll, page.caseSensitive = settings.mode, settings.matchAll, settings.caseSensitive
-        local keywords = table.concat(settings.keywords, ", ")
-        if page.keywords:GetText() ~= keywords then page.keywords:SetText(keywords) end
-        if page.prefix:GetText() ~= settings.prefix then page.prefix:SetText(settings.prefix) end
-    end
-    paintFilter(page)
-end
-
----------------------------------------------------------------------------
--- Window
----------------------------------------------------------------------------
-
-local function paintStatus(status)
-    local tone, title, detail = describe(status)
-    local color = tones[tone]
-    local strip = frame.statusStrip
-    strip.accent:SetColorTexture(color[1], color[2], color[3], 1)
-    strip.lamp:SetColorTexture(color[1], color[2], color[3], 1)
-    strip.glow:SetColorTexture(color[1], color[2], color[3], .22)
-    strip.tint:SetGradient("HORIZONTAL", CreateColor(color[1], color[2], color[3], .2), CreateColor(color[1], color[2], color[3], 0))
-    frame.status:SetText(A.Text(title))
-    frame.status:SetTextColor(unpack(color))
-    frame.statusDetail:SetText(A.Text(detail))
-    strip.label, strip.reason = status.label, status.reason
-    -- A change of state (Paused to Recording, say) fades the new wording in; the first paint after opening does not.
-    local key = tone .. "|" .. title
-    if strip.key and strip.key ~= key then
-        reveal(frame.status, 0, M.timing.message, 0)
-        reveal(frame.statusDetail, 0, M.timing.message, 0)
-    end
-    strip.key = key
-end
-
-local chipRing, chipIcon = 32, 28
-
-local function createChips(parent)
-    local chips, slot = {}, math.floor(inner / #classes)
-    local strip = CreateFrame("Frame", nil, parent)
-    strip:SetSize(inner, 50)
-    strip:SetPoint("TOPLEFT", 0, -chipsTop)
-    frame.chipStrip = strip
-    for index, token in ipairs(classes) do
-        -- A round class icon inside a ring; the ring carries the state (gold when filtered, class colour when present).
-        local chip = CreateFrame("Button", nil, strip)
-        chip:SetSize(slot - 3, 50)
-        chip:SetPoint("TOPLEFT", 1 + (index - 1) * slot, 0)
-        chip.ring = T.Disc(chip, "TOP", 0, -1, chipRing, T.line, 1, "BORDER")
-        chip.icon = chip:CreateTexture(nil, "ARTWORK")
-        chip.icon:SetSize(chipIcon, chipIcon)
-        chip.icon:SetPoint("TOP", 0, -1 - (chipRing - chipIcon) / 2)
-        T.Circle(chip, chip.icon)
-        if token == "ALL" then
-            chip.icon:SetColorTexture(T.gold[1], T.gold[2], T.gold[3], .18)
-            chip.all = Label(chip, 14, T.gold, true)
-            chip.all:SetPoint("TOP", 0, -1 - (chipRing - 20) / 2)
-            chip.all:SetSize(slot - 3, 20)
-            chip.all:SetJustifyH("CENTER")
-            chip.all:SetText("All")
-        else T.ClassIcon(chip.icon, token) end
-        chip.count = Label(chip, 13, T.muted)
-        chip.count:SetPoint("BOTTOM", 0, 0)
-        chip.count:SetSize(slot - 3, 17)
-        chip.count:SetJustifyH("CENTER")
-        chip:SetScript("OnClick", function()
-            classFilter = (classFilter == token or token == "ALL") and "ALL" or token
-            offset = 0
-            U.Refresh()
-            revealRows()
-        end)
-        chip:SetScript("OnEnter", function(self)
-            self.hovered = true
-            if not self.active then self.ring:SetColorTexture(unpack(T.muted)) end
-            GameTooltip:SetOwner(self, "ANCHOR_TOP")
-            GameTooltip:AddLine(A.Text(className(token)), unpack(T.gold))
-            GameTooltip:AddLine(plural(frame.counts and frame.counts[token] or 0, "player"), 1, 1, 1)
-            GameTooltip:Show()
-        end)
-        chip:SetScript("OnLeave", function(self)
-            self.hovered = false
-            if not self.active then self.ring:SetColorTexture(unpack(self.restColor or T.line)) end
-            GameTooltip:Hide()
-        end)
-        chips[token] = chip
-    end
-    return chips
-end
-
-local function createContextMenu(parent)
-    local choices = { { id = false, label = "No raid context" } }
-    for _, context in ipairs(P.Contexts()) do choices[#choices + 1] = { id = context.id, label = context.name } end
-    local menu = T.Panel(parent, 236, #choices * 34 + 16, true)
-    menu:SetPoint("TOPRIGHT", frame.contextButton, "BOTTOMRIGHT", 0, -6)
-    menu:SetFrameLevel(parent:GetFrameLevel() + 30)
-    menu:SetBackdropBorderColor(unpack(T.trim))
-    menu.catcher = CreateFrame("Button", nil, frame)
-    menu.catcher:SetAllPoints()
-    menu.catcher:SetFrameLevel(frame:GetFrameLevel() + 20)
-    menu.catcher:SetScript("OnClick", function() setMenu(false) end)
-    menu.catcher:Hide()
-    menu.buttons, menu.choices = {}, choices
-    for index, choice in ipairs(choices) do
-        local button = Button(menu, A.Text(choice.label), 220, 30, function()
-            contextID = choice.id or nil
-            setMenu(false)
-            U.Refresh()
-            revealRows()
-        end)
-        button:SetPoint("TOPLEFT", 8, -8 - (index - 1) * 34)
-        menu.buttons[index] = button
-    end
-    menu:Hide()
-    return menu
-end
-
-local function createRowMenu()
-    local menu = T.Panel(frame, 236, 156, true)
-    menu:SetFrameLevel(frame:GetFrameLevel() + 31)
-    menu:SetBackdropBorderColor(unpack(T.trim))
-    menu.title = text(menu, 14, T.cream, 14, 10, 208, 22)
-    menu.title:SetMaxLines(1)
-    T.Rule(menu, 1, 38, 234)
-    menu.catcher = CreateFrame("Button", nil, frame)
-    menu.catcher:SetAllPoints()
-    menu.catcher:SetFrameLevel(frame:GetFrameLevel() + 20)
-    menu.catcher:RegisterForClicks("AnyUp")
-    menu.catcher:SetScript("OnClick", function() hideMenus() end)
-    menu.catcher:Hide()
-    menu.whisper = Button(menu, "Whisper", 220, 30, function()
-        if menu.blocked then return end
-        local identity = menu.identity
-        hideMenus()
-        whisperTo(identity)
     end)
-    menu.whisper:SetPoint("TOPLEFT", 8, -46)
-    menu.invite = Button(menu, "Invite to group", 220, 30, function()
-        if menu.blocked then return end
-        local identity = menu.identity
-        hideMenus()
-        inviteTo(identity)
-    end)
-    menu.invite:SetPoint("TOPLEFT", 8, -82)
-    menu.remove = Button(menu, "Remove from roster", 220, 30, function()
-        local key = menu.key
-        hideMenus()
-        W.Remove(key)
+    page.save:SetPoint("TOPRIGHT", -pad, -380)
+    T.Rule(page, 1, 414, 322)
+
+    -- The roster clears itself; this is the escape hatch, and it asks twice.
+    page.reset = T.Button(page, "Reset roster", 130, 24, function(self)
+        if not page.confirming then
+            page.confirming = true
+            self.label:SetText("Click to confirm")
+            return
+        end
+        page.confirming = false
+        self.label:SetText("Reset roster")
+        W.Clear()
         U.Refresh()
     end, "danger")
-    menu.remove:SetPoint("TOPLEFT", 8, -118)
-    menu:Hide()
-    return menu
-end
-
-local function createRoster(parent)
-    local page = CreateFrame("Frame", nil, parent)
-    page:SetPoint("TOPLEFT", gutter, -pageTop)
-    page:SetSize(inner, rosterHeight)
-
-    -- The player and whisper count sits at the right of the status strip, behind a hairline; it belongs to
-    -- this page so it leaves with it.
-    local strip = frame.statusStrip
-    frame.count = Label(page, 13, T.cream)
-    frame.count:SetPoint("RIGHT", strip, "RIGHT", -16, 0)
-    frame.count:SetSize(countWidth, 34)
-    frame.count:SetMaxLines(2)
-    frame.count:SetJustifyH("RIGHT")
-    local divider = page:CreateTexture(nil, "ARTWORK")
-    divider:SetColorTexture(T.line[1], T.line[2], T.line[3], 1)
-    divider:SetSize(1, 24)
-    divider:SetPoint("RIGHT", strip, "RIGHT", -(16 + countWidth + 14), 0)
-
-    -- The raid-parse picker lives on the right of the tab row, where it is always within reach.
-    frame.contextButton = Button(frame.nav, "Raid parses", 188, 28, function()
-        setMenu(not frame.contextMenu:IsShown())
-    end)
-    frame.contextButton:SetPoint("TOPRIGHT", 0, 0)
-    frame.contextButton.label:ClearAllPoints()
-    frame.contextButton.label:SetPoint("CENTER", -8, 0)
-    frame.contextButton.label:SetSize(144, 20)
-    frame.contextButton.label:SetMaxLines(1)
-    frame.contextButton.label:SetJustifyH("CENTER")
-    caret(frame.contextButton, T.gold)
-    frame.contextButton:HookScript("OnEnter", function(self)
-        GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
-        GameTooltip:AddLine("Raid parses", unpack(T.gold))
-        GameTooltip:AddLine("Show saved parses for one raid on every row instead of snapshot age.", 1, 1, 1, true)
-        GameTooltip:Show()
-    end)
-    frame.contextButton:HookScript("OnLeave", function() GameTooltip:Hide() end)
-
-    frame.chips = createChips(page)
-
-    -- Header above the list: bulk select on the left, sort keys on the right.
-    local listHeader = CreateFrame("Frame", nil, page)
-    listHeader:SetPoint("TOPLEFT", 0, -headerTop)
-    listHeader:SetSize(inner, 28)
-    frame.listHeader = listHeader
-    frame.selectAll = CreateFrame("Button", nil, listHeader)
-    frame.selectAll:SetSize(250, 28)
-    frame.selectAll:SetPoint("TOPLEFT", 0, 0)
-    frame.selectAll.box = checkbox(frame.selectAll)
-    frame.selectAll.box:SetPoint("LEFT", 0, 0)
-    frame.selectAll.label = text(frame.selectAll, 13, T.muted, 30, 4, 216, 20)
-    frame.selectAll:SetScript("OnClick", function()
-        local selected, all = W.GetSelection(), true
-        for _, entry in ipairs(views) do if not selected[entry.record.key] then all = false end end
-        for _, entry in ipairs(views) do if (selected[entry.record.key] == true) == all then toggleKey(entry) end end
-        U.Refresh()
-    end)
-    frame.sortButtons = {}
-    local sortWidths = { recent = 64, name = 54, score = 92 }
-    local previous
-    for _, key in ipairs({ "score", "name", "recent" }) do
-        local button = flat(listHeader, sortNames[key] or "GearScore", sortWidths[key], 28, 13, function()
-            sortKey = key
-            offset = 0
-            U.Refresh()
-            revealRows()
-        end)
-        if previous then button:SetPoint("RIGHT", previous, "LEFT", -2, 0) else button:SetPoint("TOPRIGHT", 0, 0) end
-        frame.sortButtons[key] = button
-        previous = button
+    page.reset:SetPoint("TOPLEFT", pad, -424)
+    text(page, 13, T.muted, 160, 428, 148, 20, "RIGHT"):SetText("Esc closes")
+    function page:closed()
+        self.confirming = false
+        self.reset.label:SetText("Reset roster")
     end
-    frame.sortLabel = Label(listHeader, 13, T.muted)
-    frame.sortLabel:SetPoint("RIGHT", previous, "LEFT", -6, 0)
-    frame.sortLabel:SetText("Sort")
 
-    local box = T.Panel(page, inner, listHeight, true)
-    box:SetPoint("TOPLEFT", 0, -listTop)
-    frame.listBox = box
-    frame.viewport = CreateFrame("Frame", nil, box)
-    frame.viewport:SetPoint("TOPLEFT", 1, -1)
-    frame.viewport:SetSize(rowWidth, visibleRows * rowHeight)
-    frame.viewport:EnableMouseWheel(true)
-    frame.viewport:SetScript("OnMouseWheel", function(_, delta) setOffset(offset - delta * 2) end)
-    box:EnableMouseWheel(true)
-    box:SetScript("OnMouseWheel", function(_, delta) setOffset(offset - delta * 2) end)
-    frame.rows = {}
-    for index = 1, visibleRows do frame.rows[index] = createRow(frame.viewport, index) end
-
-    frame.scrollbar = CreateFrame("Slider", nil, box)
-    frame.scrollbar:SetPoint("TOPRIGHT", -3, -2)
-    frame.scrollbar:SetSize(trackWidth, visibleRows * rowHeight - 2)
-    frame.scrollbar:SetOrientation("VERTICAL")
-    frame.scrollbar:SetValueStep(1)
-    if frame.scrollbar.SetObeyStepOnDrag then frame.scrollbar:SetObeyStepOnDrag(true) end
-    fill(frame.scrollbar, 0, 0, trackWidth, visibleRows * rowHeight - 2, T.line, .8)
-    frame.thumb = fill(frame.scrollbar, 0, 0, trackWidth, 36, T.gold, .55, "OVERLAY")
-    frame.scrollbar:SetThumbTexture(frame.thumb)
-    frame.scrollbar:SetMinMaxValues(0, 0)
-    frame.scrollbar:SetScript("OnValueChanged", function(_, scrolled)
-        if not syncing then setOffset(scrolled) end
-    end)
-    frame.scrollbar:Hide()
-
-    -- Empty state shares the list area.
-    local empty = CreateFrame("Frame", nil, box)
-    empty:SetPoint("TOPLEFT", 1, -1)
-    empty:SetSize(rowWidth, visibleRows * rowHeight)
-    empty.logo = empty:CreateTexture(nil, "ARTWORK")
-    empty.logo:SetSize(52, 52)
-    empty.logo:SetPoint("TOP", 0, -24)
-    empty.logo:SetTexture(T.logo)
-    empty.logo:SetAlpha(.6)
-    empty.title = text(empty, 17, T.gold, 24, 0, rowWidth - 48, 24, "CENTER", true)
-    empty.body = text(empty, 14, T.muted, 56, 0, rowWidth - 112, 20, "CENTER")
-    empty.body:SetMaxLines(4)
-    if empty.body.SetJustifyV then empty.body:SetJustifyV("TOP") end
-    empty.reset = Button(empty, "Show all classes", 170, 32, function()
-        classFilter, offset = "ALL", 0
-        U.Refresh()
-        revealRows()
-    end)
-    empty.reset:SetPoint("TOP", 0, 0)
-    empty:Hide()
-    frame.empty = empty
-
-    local footer = CreateFrame("Frame", nil, page)
-    footer:SetPoint("TOPLEFT", 0, -footerTop)
-    footer:SetSize(inner, 64)
-    frame.footer = footer
-    frame.clear = Button(footer, "Clear roster", 132, 32, showConfirm, "danger")
-    frame.clear:SetPoint("TOPLEFT", 0, 0)
-    frame.bulk = Button(footer, "Bulk Search", 240, 32, function() showCopy() end, "primary")
-    frame.bulk:SetPoint("TOPRIGHT", 0, 0)
-    frame.message = text(footer, 13, T.muted, 0, 46, inner, 20)
-
-    frame.contextMenu = createContextMenu(page)
+    -- Copies saved values into the page. The filter draft is only replaced while it is clean.
+    function page:Sync(force)
+        local settings = W.GetSettings()
+        self.reset:SetShown(not W.IsReadOnly())
+        self.collect:SetChecked(settings.enabled)
+        self.snapshots:SetChecked(settings.showSnapshots)
+        for key, button in pairs(self.retention) do button:SetSelected(settings.retention == key) end
+        if force or not self.dirty then
+            self.mode, self.matchAll, self.caseSensitive = settings.mode, settings.matchAll, settings.caseSensitive
+            local keywords = table.concat(settings.keywords, ", ")
+            if self.keywords:GetText() ~= keywords then self.keywords:SetText(keywords) end
+            if self.prefix:GetText() ~= settings.prefix then self.prefix:SetText(settings.prefix) end
+        end
+        paintFilter(self)
+    end
     return page
 end
 
-local function create()
-    frame = T.Panel(UIParent, width, height)
-    A.whisperWindow = frame
-    frame:SetFrameStrata("DIALOG")
-    frame:SetClampedToScreen(true)
-    frame:SetBackdropColor(unpack(T.background))
-    frame:SetBackdropBorderColor(unpack(T.trim))
+function closeOverlays(except)
+    if not panel then return end
+    for _, name in ipairs({ "settings", "copy" }) do
+        local overlay = panel[name]
+        if overlay and name ~= except and overlay:IsShown() then overlay:Hide() end
+    end
+    hideMenus()
+end
 
-    -- Inner hairline and gold corner brackets give the frame a game-dialog feel without Blizzard art.
-    -- The bottom edge hangs from the bottom of the frame, so each tab can size the window to its own page.
-    local function edge(layer, color, w, h, ...)
-        local texture = frame:CreateTexture(nil, layer)
-        texture:SetColorTexture(color[1], color[2], color[3], 1)
-        if w then texture:SetWidth(w) end
-        if h then texture:SetHeight(h) end
-        for index = 1, select("#", ...), 3 do
-            local point, x, y = select(index, ...)
-            texture:SetPoint(point, x, y)
+function showSettings()
+    if not panel then return end
+    closeOverlays("settings")
+    if not panel.settings then panel.settings = createSettings() end
+    local page = panel.settings
+    page:Sync(true)
+    page:Show()
+    reveal(page)
+end
+
+---------------------------------------------------------------------------
+-- Bulk Search dialog
+---------------------------------------------------------------------------
+
+function showCopy()
+    if InCombatLockdown() then A.Print("Bulk URL copying is unavailable during combat."); return end
+    closeOverlays("copy")
+    local result, reason = P.BuildExport(W.GetRows(), W.GetSelection(), W.GetContext().epoch)
+    if not result then A.Print(reason or "No exportable players."); return end
+    if result.count == 0 or #result.urls == 0 then
+        A.Print("No exportable players. " .. #result.excluded .. " identities are unresolved or unsupported.")
+        return
+    end
+    if not panel.copy then
+        local box = dialog("SoulshardWhisperCopy", 300, 232, "Bulk Search")
+        box.summary = text(box, 14, T.cream, 16, 56, 268, 22)
+        box.help = text(box, 13, T.muted, 16, 80, 268, 52)
+        box.help:SetMaxLines(3)
+        if box.help.SetWordWrap then box.help:SetWordWrap(true) end
+        box.help:SetText("Press Ctrl+C (Cmd+C on Mac) to copy, then paste the link into your browser.")
+        box.edit = input(box, 16, 134, 268)
+        box.edit:SetMaxLetters(6000)
+        box.noteArea = CreateFrame("Frame", nil, box)
+        box.noteArea:SetPoint("TOPLEFT", 16, -170)
+        box.noteArea:SetSize(268, 22)
+        box.note = text(box.noteArea, 13, T.muted, 0, 0, 268, 22)
+        box.previous = redButton(box, "Previous", 78, 24, function() box:SelectLink(box.link - 1) end)
+        box.previous:SetPoint("BOTTOMLEFT", 16, 16)
+        box.next = redButton(box, "Next link", 90, 24, function() box:SelectLink(box.link + 1) end)
+        box.next:SetPoint("LEFT", box.previous, "RIGHT", 8, 0)
+        box.done = redButton(box, "Close", 74, 24, function() box:Hide() end)
+        box.done:SetPoint("BOTTOMRIGHT", -16, 16)
+        -- Everyone selected goes in one link. A second link only exists when the website could not hold them in one:
+        -- players from several realms (a link names one realm) or a list past the page's size.
+        function box:SelectLink(index)
+            local urls = self.result.urls
+            self.link = math.max(1, math.min(#urls, index))
+            self.edit:SetText(urls[self.link])
+            self.edit:SetFocus()
+            self.edit:HighlightText()
+            if #urls == 1 then
+                self.summary:SetText(plural(self.result.count, "player"))
+            else
+                self.summary:SetText("Link " .. self.link .. " of " .. #urls .. " · " .. plural(self.result.counts[self.link], "player"))
+            end
+            self.previous:SetShown(#urls > 1)
+            self.next:SetShown(#urls > 1)
+            setEnabled(self.previous, self.link > 1)
+            setEnabled(self.next, self.link < #urls)
         end
+        box.edit:SetScript("OnTextChanged", function(self)
+            if box.result and self:GetText() ~= box.result.urls[box.link] then self:SetText(box.result.urls[box.link]) end
+        end)
+        box.edit:SetScript("OnEscapePressed", function() box:Hide() end)
+        box.edit:SetScript("OnEnterPressed", function() box:Hide() end)
+        function box:closed() self.edit:ClearFocus() end
+        box.noteArea:EnableMouse(true)
+        box.noteArea:SetScript("OnEnter", function()
+            if not box.result or #box.result.excluded == 0 then return end
+            GameTooltip:SetOwner(box, "ANCHOR_LEFT")
+            GameTooltip:AddLine("Excluded from export", unpack(T.gold))
+            for index, excluded in ipairs(box.result.excluded) do
+                if index > 10 then GameTooltip:AddLine("Additional exclusions: " .. (#box.result.excluded - 10)); break end
+                GameTooltip:AddLine(A.Text(excluded.name .. ": " .. excluded.reason), 1, 1, 1, true)
+            end
+            GameTooltip:Show()
+        end)
+        box.noteArea:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        panel.copy = box
     end
-    edge("BORDER", T.line, nil, 1, "TOPLEFT", 3, -3, "TOPRIGHT", -3, -3)
-    edge("BORDER", T.line, nil, 1, "BOTTOMLEFT", 3, 3, "BOTTOMRIGHT", -3, 3)
-    edge("BORDER", T.line, 1, nil, "TOPLEFT", 3, -3, "BOTTOMLEFT", 3, 3)
-    edge("BORDER", T.line, 1, nil, "TOPRIGHT", -3, -3, "BOTTOMRIGHT", -3, 3)
-    for _, point in ipairs({ "TOPLEFT", "TOPRIGHT", "BOTTOMLEFT", "BOTTOMRIGHT" }) do
-        local x, y = point:find("LEFT") and 3 or -3, point:find("TOP") and -3 or 3
-        edge("ARTWORK", T.trim, 12, 2, point, x, y)
-        edge("ARTWORK", T.trim, 2, 12, point, x, y)
+    local box = panel.copy
+    box.result = result
+    box.note:SetText(#result.excluded > 0 and (#result.excluded .. " excluded") or "")
+    panel.scrim:Show()
+    box:Show()
+    box:SelectLink(1)
+    reveal(box)
+end
+
+---------------------------------------------------------------------------
+-- The panel
+---------------------------------------------------------------------------
+
+local function acknowledgeAll()
+    for _, record in ipairs(W.GetRows()) do acknowledged[record.key] = true end
+end
+
+-- The native pages (Create Listing, Group Browser) draw the frame art themselves, so it vanishes with them. This draws
+-- the same Blizzard textures from the Browse page at the same offsets, in a frame that sits where the pages sit, so
+-- the Whispers tab is the native frame and nothing is laid over it. Texture files are read from the Browse page when it
+-- exists; the paths below are the ones its XML uses.
+local artFile, artAtlas = "Interface\\LFGFrame\\UI-LFG-FRAME", "groupfinder-background-classic"
+
+local function nativeTexture(name, fallback)
+    local region = _G["LFGBrowseFrame" .. name]
+    if region and type(region.GetTexture) == "function" then
+        local ok, value = pcall(region.GetTexture, region)
+        if ok and (type(value) == "string" or type(value) == "number") then return value end
     end
+    return fallback
+end
 
-    frame.motionGeneration = 0
+local function artTexture(art, name, fallback, sublevel, width, height, x, y, top, bottom)
+    local texture = art:CreateTexture(nil, "BACKGROUND", nil, sublevel)
+    texture:SetTexture(nativeTexture(name, fallback))
+    texture:SetSize(width, height)
+    texture:SetPoint("TOPLEFT", x, -y)
+    texture:SetTexCoord(0, 1, top, bottom)
+    return texture
+end
 
-    -- Title bar. The logo and title live in their own container so they can rise on their own.
-    local header = fill(frame, 1, 1, width - 2, 46, { 1, 1, 1 }, 1, "BACKGROUND")
-    header:SetGradient("VERTICAL", CreateColor(T.surface[1], T.surface[2], T.surface[3], 1), CreateColor(0.150, 0.125, 0.092, 1))
-    fill(frame, 1, 47, width - 2, 1, T.trim, 1, "BORDER")
-    frame.head = CreateFrame("Frame", nil, frame)
-    frame.head:SetPoint("TOPLEFT", 1, -1)
-    frame.head:SetSize(width - 2 - 60, 46)
-    frame.logo = frame.head:CreateTexture(nil, "ARTWORK")
-    frame.logo:SetSize(28, 28)
-    frame.logo:SetPoint("TOPLEFT", 19, -9)
-    frame.logo:SetTexture(T.logo)
-    frame.title = text(frame.head, 19, T.gold, 57, 11, 220, 26, nil, true)
-    frame.title:SetText("Whispers")
-    frame.dismiss = Button(frame, "×", 28, 28, close)
-    frame.dismiss:SetPoint("TOPRIGHT", -16, -10)
-    -- A short light bar that crosses the title rule when the window opens, as on the profile page.
-    frame.sweep = CreateFrame("Frame", nil, frame)
-    frame.sweep:SetPoint("TOPLEFT", 1, -45)
-    frame.sweep:SetSize(72, 4)
-    fill(frame.sweep, 0, 0, 72, 4, T.quality.EPIC, .2, "ARTWORK")
-    fill(frame.sweep, 0, 1, 72, 1, T.gold, .8, "OVERLAY")
-    frame.sweep:Hide()
+local function createArt()
+    local art = CreateFrame("Frame", nil, native)
+    art:SetAllPoints(native)
+    art.top = artTexture(art, "FrameBackgroundTop", "Interface\\LFGFrame\\UI-LFR-FRAME-MAIN", -1, 512, 121, -1, 0, 0, .236328125)
+    art.middle = artTexture(art, "FrameBackgroundMiddle", artFile, -1, 512, 135, 0, 121, .236328125, .5)
+    art.inset = art:CreateTexture(nil, "BACKGROUND", nil, 0)
+    if type(art.inset.SetAtlas) == "function" then art.inset:SetAtlas(artAtlas) end
+    art.inset:SetSize(324, 282)
+    art.inset:SetPoint("TOPLEFT", 22, -129)
+    art.bottom = artTexture(art, "FrameBackgroundBottom", artFile, 1, 512, 256, 0, 256, .5, 1)
+    art.title = art:CreateFontString(nil, "BACKGROUND", "GameFontNormal")
+    art.title:SetPoint("TOP", 0, -18)
+    art.title:SetText(_G.LFG_TITLE or "Looking For Group")
+    art:Hide()
+    return art
+end
 
-    -- Status strip (always visible)
-    local strip = T.Panel(frame, inner, 44, true)
-    strip:SetPoint("TOPLEFT", gutter, -62)
-    strip:SetBackdropColor(unpack(T.input))
-    strip.tint = fill(strip, 1, 1, inner - 2, 42, { 1, 1, 1 }, 1, "BACKGROUND")
-    strip.accent = fill(strip, 1, 1, 3, 42, T.gold, 1, "ARTWORK")
-    strip.glow = fill(strip, 19, 16, 12, 12, T.gold, .22, "ARTWORK")
-    strip.glow:SetRotation(math.pi / 4)
-    strip.lamp = fill(strip, 21, 18, 8, 8, T.gold, 1, "OVERLAY")
-    strip.lamp:SetRotation(math.pi / 4)
-    frame.statusStrip = strip
-    frame.status = Label(strip, 15, T.gold, true)
-    frame.status:SetPoint("LEFT", 44, 0)
-    frame.statusDetail = Label(strip, 13, T.cream)
-    frame.statusDetail:SetPoint("LEFT", 136, 0)
-    frame.statusDetail:SetSize(inner - 136 - (16 + countWidth + 14) - 12, 34)
-    frame.statusDetail:SetMaxLines(2)
-    strip:EnableMouse(true)
-    strip:SetScript("OnEnter", function(self)
+local function createPanel()
+    panel = CreateFrame("Frame", "SoulshardLookupWhispersPanel", native)
+    panel:SetAllPoints(native)
+    -- Above the art frame and the native widgets, below the pop-ups.
+    panel:SetFrameLevel(native:GetFrameLevel() + 15)
+    A.whisperPanel = panel
+    panel.art = createArt()
+    -- Players restored from an earlier session are not new.
+    for _, record in ipairs(W.GetRows()) do if record.restored then acknowledged[record.key] = true end end
+
+    -- Banner: status, counts, one line of detail and the gear.
+    local banner = CreateFrame("Frame", nil, panel)
+    banner:SetPoint("TOPLEFT", bannerX, -bannerTop)
+    banner:SetSize(bannerWidth, 50)
+    panel.banner = banner
+    banner.lamp = T.Disc(banner, "TOPLEFT", 0, -7, 9, T.gold, 1, "ARTWORK")
+    banner.status = Label(banner, 15, T.gold, true)
+    banner.status:SetPoint("TOPLEFT", 14, -2)
+    banner.status:SetSize(92, 20)
+    banner.status:SetMaxLines(1)
+    banner.count = Label(banner, 13, T.cream)
+    banner.count:SetPoint("TOPRIGHT", 0, -3)
+    banner.count:SetSize(134, 18)
+    banner.count:SetMaxLines(1)
+    banner.count:SetJustifyH("RIGHT")
+    banner.detail = text(banner, 13, T.cream, 0, 26, bannerWidth, 20)
+    banner:EnableMouse(true)
+    banner:SetScript("OnEnter", function(self)
         if not self.label then return end
         GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
         GameTooltip:AddLine("Whisper Collector", unpack(T.gold))
@@ -1536,179 +1429,305 @@ local function create()
         if self.reason then GameTooltip:AddLine(A.Text(self.reason), .75, .72, .80, true) end
         GameTooltip:Show()
     end)
-    strip:SetScript("OnLeave", function() GameTooltip:Hide() end)
-
-    -- Navigation: two equal tabs sharing one gold underline that slides between them.
-    local nav = CreateFrame("Frame", nil, frame)
-    nav:SetPoint("TOPLEFT", gutter, -navTop)
-    nav:SetSize(inner, navHeight)
-    frame.nav = nav
-    fill(nav, 0, navHeight - 1, inner, 1, T.line, 1, "BORDER")
-    frame.tabLine = fill(nav, 0, navHeight - 3, tabWidth, 2, T.gold, 1, "ARTWORK")
-    frame.tabs = {}
-    for index, definition in ipairs({ { "roster", "Roster" }, { "settings", "Settings" } }) do
-        local name = definition[1]
-        local tab = flat(nav, definition[2], tabWidth, navHeight - 3, 15, function() selectTab(name) end, true)
-        tab:SetPoint("TOPLEFT", (index - 1) * tabPitch, 0)
-        tab.label:ClearAllPoints()
-        tab.label:SetPoint("LEFT", 14, 0)
-        tab.line:Hide()
-        function tab:SetActive(active)
-            self.active = active
-            self:Paint()
-        end
-        frame.tabs[name] = tab
-    end
-    frame.tabs.roster.badge = Label(frame.tabs.roster, 13, T.muted)
-    frame.tabs.roster.badge:SetPoint("LEFT", frame.tabs.roster.label, "RIGHT", 8, 0)
-
-    frame.roster = createRoster(frame)
-    frame.rowMenu = createRowMenu()
-    frame.settings = createSettings(frame)
-    frame.body = frame.roster
-
-    -- Overlays
-    frame.scrim = CreateFrame("Button", nil, frame)
-    frame.scrim:SetAllPoints()
-    frame.scrim:SetFrameLevel(frame:GetFrameLevel() + 40)
-    frame.scrim:EnableMouse(true)
-    local shade = frame.scrim:CreateTexture(nil, "BACKGROUND")
-    shade:SetAllPoints()
-    shade:SetColorTexture(0, 0, 0, .62)
-    frame.scrim:SetScript("OnClick", function() closeOverlays() end)
-    frame.scrim:Hide()
-
-    frame:SetScript("OnHide", function()
-        closeOverlays()
-        currentTab = "roster"
-        frame.knownKeys, frame.fresh = nil, nil
-        frame.statusStrip.key = nil
-        cancelMotion()
-        frame.tabs.roster:SetActive(true)
-        frame.tabs.settings:SetActive(false)
-        GameTooltip:Hide()
+    banner:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    -- On the spot the native Browse page keeps its own options gear (16 wide, 40 from the right, 44 from the top).
+    panel.gearButton = CreateFrame("Button", nil, panel)
+    panel.gearButton:SetSize(22, 22)
+    panel.gearButton:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -37, -41)
+    panel.gearButton.gear = gear(panel.gearButton, 16, T.muted)
+    panel.gearButton.gear:SetPoint("CENTER")
+    panel.gearButton:SetScript("OnClick", function() showSettings() end)
+    panel.gearButton:SetScript("OnEnter", function(self)
+        self.gear:SetColor(T.gold)
+        GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
+        GameTooltip:AddLine("Collector settings", unpack(T.gold))
+        GameTooltip:Show()
     end)
-    if type(frame.EnableKeyboard) == "function" and type(frame.SetPropagateKeyboardInput) == "function" then
-        frame:EnableKeyboard(true)
-        frame:SetPropagateKeyboardInput(true)
-        frame:SetScript("OnKeyDown", function(self, key)
+    panel.gearButton:SetScript("OnLeave", function(self) self.gear:SetColor(T.muted); GameTooltip:Hide() end)
+
+    -- Click-away catcher shared by every menu.
+    panel.catcher = CreateFrame("Button", nil, panel)
+    panel.catcher:SetAllPoints(panel)
+    panel.catcher:SetFrameLevel(panel:GetFrameLevel() + 20)
+    panel.catcher:RegisterForClicks("AnyUp")
+    panel.catcher:SetScript("OnClick", function() hideMenus() end)
+    panel.catcher:Hide()
+    if type(panel.SetPropagateKeyboardInput) == "function" then
+        panel:SetScript("OnKeyDown", function(self, key)
             self:SetPropagateKeyboardInput(not (key == "ESCAPE" and U.HandleEscape()))
         end)
     end
-    _G.SoulshardWhisperWindow = frame
-    table.insert(UISpecialFrames, "SoulshardWhisperWindow")
-    frame.tabs.roster:SetActive(true)
-    frame:Hide()
-end
 
--- Switches pages with no motion at all.
-local function applyTab(name)
-    currentTab = name
-    fitHeight(name)
-    frame.roster:SetShown(name == "roster")
-    frame.settings:SetShown(name == "settings")
-    frame.contextButton:SetShown(name == "roster")
-    frame.tabs.roster:SetActive(name == "roster")
-    frame.tabs.settings:SetActive(name == "settings")
-    placeTabLine()
-    if name == "settings" then syncSettings(true) end
-end
-
-function selectTab(name)
-    if not frame then return end
-    closeOverlays()
-    local previous = currentTab
-    -- Settle anything still moving so the change starts from a known state.
-    cancelMotion()
-    if previous == name or not frame:IsShown() or not animated() then
-        applyTab(name)
-        U.Refresh()
-        return
-    end
-    local direction = name == "settings" and 1 or -1
-    local outgoing = previous == "roster" and frame.roster or frame.settings
-    local incoming = name == "roster" and frame.roster or frame.settings
-    local generation = frame.motionGeneration
-    currentTab = name
-    fitHeight(name)
-    frame.tabs.roster:SetActive(name == "roster")
-    frame.tabs.settings:SetActive(name == "settings")
-    if name == "settings" then syncSettings(true) end
-    -- The incoming page is filled in while it is still hidden.
-    U.Refresh()
-    local timing = M.timing
-    play(frame.tabLine, { fromAlpha = 1, toX = direction * tabPitch, duration = timing.underline, finish = placeTabLine })
-    if previous == "roster" then
-        play(frame.contextButton, { fromAlpha = 1, toAlpha = 0, duration = timing.exit, smoothing = "IN", finish = function()
-            if frame.motionGeneration ~= generation then return end
-            frame.contextButton:Hide()
-            frame.contextButton:SetAlpha(1)
-        end })
-    end
-    play(outgoing, { fromAlpha = 1, toAlpha = 0, toX = -direction * 12, duration = timing.exit, smoothing = "IN", finish = function()
-        if frame.motionGeneration ~= generation then return end
-        outgoing:Hide()
-        outgoing:SetAlpha(1)
-        incoming:Show()
-        play(incoming, { fromX = direction * 24, duration = timing.enter })
-        if name == "roster" then
-            frame.contextButton:Show()
-            reveal(frame.contextButton, 0, timing.message, 0)
+    -- Two dropdowns.
+    panel.raidButton = dropdown(panel, dropdownLeft, raidWidth, "Parses", function(self)
+        local _, raid, reason = effectiveContext()
+        local list = {
+            { text = "Auto · " .. (raid and raid.name or reason), checked = choice == nil, onClick = function() choice = nil; U.Refresh() end },
+            { separator = true },
+        }
+        for _, context in ipairs(P.Contexts()) do
+            list[#list + 1] = {
+                text = context.name, right = context.size and (context.size .. "-man") or nil, checked = choice == context.id,
+                onClick = function() choice = context.id; U.Refresh() end,
+            }
         end
-    end })
-end
+        list[#list + 1] = { separator = true }
+        list[#list + 1] = { text = "No raid parses", checked = choice == false, onClick = function() choice = false; U.Refresh() end }
+        menus.raid:Open(list, "TOPLEFT", self, "BOTTOMLEFT", 0, -2)
+    end)
+    panel.raidButton.tip = { "Raid parses", "Auto follows the raid your group is listed for. Pick a raid to show its parses instead." }
+    panel.viewButton = dropdown(panel, dropdownLeft + raidWidth + dropdownGap, viewWidth, nil, function(self)
+        menus.view:Open({
+            { text = "Group by class", checked = grouping == "class", onClick = function() grouping, offset = "class", 0; U.Refresh() end },
+            { text = "No grouping", checked = grouping == "none", onClick = function() grouping, offset = "none", 0; U.Refresh() end },
+        }, "TOPRIGHT", self, "BOTTOMRIGHT", 0, -2)
+    end)
+    panel.viewButton.tip = { "Roster view", "Group players under their class, or list everyone newest first." }
 
-function U.Refresh()
-    if not frame or not frame:IsShown() then return end
-    local settings, status = W.GetSettings(), W.GetStatus()
-    paintStatus(status)
-    local total = #W.GetRows()
-    frame.tabs.roster.badge:SetText(total > 0 and tostring(total) or "")
-    if currentTab == "roster" then refreshRoster(settings, status)
-    else syncSettings(false) end
-end
-
-function U.Show(manual, tab)
-    if not initialized then return end
-    if not manual and (manuallyClosed or not W.GetSettings().autoShow) then return end
-    if manual then manuallyClosed = false end
-    W.RefreshState(true)
-    if W.GetStatus().state == "unsupported-client" then return end
-    if InCombatLockdown() then
-        if manual then A.Print("Collector settings are unavailable during combat.") else pending = true end
-        return
+    -- List header: select all on the left, column captions on the right.
+    local header = CreateFrame("Frame", nil, panel)
+    header:SetPoint("TOPLEFT", frameLeft, -headerTop)
+    header:SetSize(frameWidth, headerHeight)
+    panel.listHeader = header
+    panel.selectAll = CreateFrame("Button", nil, header)
+    panel.selectAll:SetSize(180, headerHeight)
+    panel.selectAll:SetPoint("TOPLEFT", 0, 0)
+    panel.selectAll.box = checkbox(panel.selectAll)
+    panel.selectAll.box:SetPoint("LEFT", 4, 0)
+    panel.selectAll.label = text(panel.selectAll, 13, T.muted, 30, 1, 146, 18)
+    panel.selectAll:SetScript("OnClick", function()
+        local selected, everyone = W.GetSelection(), true
+        local keys = {}
+        for _, entry in ipairs(entries) do
+            keys[#keys + 1] = entry.record.key
+            if not selected[entry.record.key] then everyone = false end
+        end
+        setKeys(keys, not everyone)
+        U.Refresh()
+    end)
+    panel.captions = {}
+    for _, spec in ipairs({ { "gs", "GS", gsX, gsWidth }, { "avg", "Avg", avgX, parseWidth }, { "best", "Best", bestX, parseWidth } }) do
+        local caption = text(header, 13, T.muted, 1 + spec[3], 1, spec[4], 18, "RIGHT")
+        caption:SetText(spec[2])
+        panel.captions[spec[1]] = caption
     end
-    pending = false
-    if not frame then create() end
-    local wasShown = frame:IsShown()
-    anchor()
-    frame:Show()
-    -- A window that is opening lands directly on the requested page, so the entrance is the only motion.
-    if tab and not wasShown then applyTab(tab) end
-    U.Refresh()
-    if not wasShown then openMotion() end
+
+    -- The list.
+    -- No box of its own: the list sits straight on the native dark inset.
+    local box = CreateFrame("Frame", nil, panel)
+    box:SetSize(frameWidth, listHeight)
+    box:SetPoint("TOPLEFT", frameLeft, -listTop)
+    panel.listBox = box
+    panel.viewport = CreateFrame("Frame", nil, box)
+    panel.viewport:SetPoint("TOPLEFT", 0, 0)
+    panel.viewport:SetSize(viewportWidth, viewportHeight)
+    if panel.viewport.SetClipsChildren then panel.viewport:SetClipsChildren(true) end
+    panel.viewport:EnableMouseWheel(true)
+    panel.viewport:SetScript("OnMouseWheel", function(_, delta) setOffset(offset - delta * 2) end)
+    box:EnableMouseWheel(true)
+    box:SetScript("OnMouseWheel", function(_, delta) setOffset(offset - delta * 2) end)
+    panel.slots = {}
+    for index = 1, poolSize do panel.slots[index] = createSlot(index) end
+
+    panel.scrollbar = CreateFrame("Slider", nil, box)
+    panel.scrollbar:SetPoint("TOPRIGHT", -4, -2)
+    panel.scrollbar:SetSize(trackWidth, viewportHeight - 4)
+    panel.scrollbar:SetOrientation("VERTICAL")
+    panel.scrollbar:SetValueStep(1)
+    if panel.scrollbar.SetObeyStepOnDrag then panel.scrollbar:SetObeyStepOnDrag(true) end
+    panel.track = fill(panel.scrollbar, 0, 0, trackWidth, viewportHeight - 4, T.line, .8)
+    panel.thumb = fill(panel.scrollbar, 0, 0, trackWidth, 36, T.gold, .55, "OVERLAY")
+    panel.scrollbar:SetThumbTexture(panel.thumb)
+    panel.scrollbar:SetMinMaxValues(0, 0)
+    panel.scrollbar:SetScript("OnValueChanged", function(_, scrolled)
+        if not panel.syncing then setOffset(scrolled) end
+    end)
+    panel.scrollbar:Hide()
+
+    -- Empty and paused states share the list area.
+    local empty = CreateFrame("Frame", nil, box)
+    empty:SetPoint("TOPLEFT", 0, 0)
+    empty:SetSize(rowWidth, viewportHeight)
+    empty.logo = empty:CreateTexture(nil, "ARTWORK")
+    empty.logo:SetSize(44, 44)
+    empty.logo:SetTexture(T.logo)
+    empty.logo:SetAlpha(.7)
+    empty.title = text(empty, 16, T.cream, 12, 0, rowWidth - 24, 22, "CENTER", true)
+    empty.body = text(empty, 13, T.muted, 0, 0, 252, 18, "CENTER")
+    empty.body:SetMaxLines(5)
+    if empty.body.SetWordWrap then empty.body:SetWordWrap(true) end
+    if empty.body.SetJustifyV then empty.body:SetJustifyV("TOP") end
+    -- The listing form is the first tab; this jumps there.
+    empty.create = redButton(empty, "Create Listing", 130, 24, function()
+        local first = native.Tab1 or _G.LFGParentFrameTab1
+        if first and type(first.Click) == "function" then first:Click()
+        elseif first and first.scripts and first.scripts.OnClick then first.scripts.OnClick(first) end
+    end)
+    empty:Hide()
+    panel.empty = empty
+
+    -- The native button row (Send Message, Group Invite) spans the same edges at the same height.
+    panel.bulk = redButton(panel, "Bulk Search (0)", 325, buttonHeight, function() showCopy() end)
+    panel.bulk:ClearAllPoints()
+    panel.bulk:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", buttonLeft, buttonBottom)
+    panel.bulk:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -buttonRight, buttonBottom)
+
+    -- Invisible click-away layer for the Bulk Search dialog, which sits over the roster and must not go stale while the
+    -- selection changes. Nothing dims the frame, and Settings (beside the frame) leaves the roster usable.
+    panel.scrim = CreateFrame("Button", nil, panel)
+    panel.scrim:SetAllPoints(panel)
+    panel.scrim:SetFrameLevel(panel:GetFrameLevel() + 40)
+    panel.scrim:EnableMouse(true)
+    panel.scrim:SetScript("OnClick", function() closeOverlays() end)
+    panel.scrim:Hide()
+
+    menus = { raid = createMenu(240), view = createMenu(134), row = createMenu(176) }
+    panel.menus = menus
+
+    -- Hide before the OnHide script exists: building the panel must not count as the player having seen the roster.
+    panel:Hide()
+    panel:SetScript("OnHide", function()
+        closeOverlays()
+        panel.scrim:Hide()
+        acknowledgeAll()
+        GameTooltip:Hide()
+    end)
 end
 
-function U.OpenSettings()
-    local wasShown = frame and frame:IsShown()
-    U.Show(true, "settings")
-    if wasShown and frame:IsShown() then selectTab("settings") end
+---------------------------------------------------------------------------
+-- The tab
+---------------------------------------------------------------------------
+
+local function nativeTab(index)
+    return native["Tab" .. index] or _G["LFGParentFrameTab" .. index]
+end
+
+local function nativeContent()
+    local frames = {}
+    for _, name in ipairs({ "LFGListingFrame", "LFGBrowseFrame" }) do
+        local frame = native[name] or _G[name]
+        if frame and type(frame.Hide) == "function" then frames[#frames + 1] = frame end
+    end
+    return frames
+end
+
+local function paintTab(selected)
+    if not tab then return end
+    if tab.fallback then tab:SetSelected(selected); return end
+    local call = selected and PanelTemplates_SelectTab or PanelTemplates_DeselectTab
+    if type(call) == "function" then pcall(call, tab) end
+end
+
+local function deselectNativeTabs()
+    if type(PanelTemplates_DeselectTab) ~= "function" then return end
+    for index = 1, 2 do
+        local other = nativeTab(index)
+        if other then pcall(PanelTemplates_DeselectTab, other) end
+    end
+end
+
+local function activate()
+    if not native or active then return end
+    if not panel then createPanel() end
+    active = true
+    -- The native pages carry their own widgets, so both go away; the art frame redraws the Blizzard frame in their place.
+    for _, frame in ipairs(nativeContent()) do frame:Hide() end
+    deselectNativeTabs()
+    paintTab(true)
+    W.RefreshState(true)
+    panel.art:Show()
+    panel:Show()
+    U.Refresh()
+end
+
+-- Another tab took over (or the Group Finder closed): put the panel away and leave the native tabs to the client.
+local function deactivate()
+    if not active then return end
+    active = false
+    paintTab(false)
+    if panel then
+        panel:Hide()
+        panel.art:Hide()
+    end
+end
+
+local function createTab()
+    local button
+    for _, template in ipairs({ "CharacterFrameTabButtonTemplate", "PanelTabButtonTemplate", "TabButtonTemplate" }) do
+        local ok, created = pcall(CreateFrame, "Button", "SoulshardLookupWhispersTab", native, template)
+        if ok and created then button = created; break end
+    end
+    local second = nativeTab(2) or nativeTab(1)
+    -- The native tabs sit one level under the frame art so its bottom edge overlaps them; the new tab does the same.
+    if button and second and type(second.GetFrameLevel) == "function" and type(button.SetFrameLevel) == "function" then
+        button:SetFrameLevel(second:GetFrameLevel())
+    end
+    if button then
+        function button:Resize()
+            if type(PanelTemplates_TabResize) == "function" then pcall(PanelTemplates_TabResize, self, 0) end
+        end
+        if second then button:SetPoint("LEFT", second, "RIGHT", -16, 0)
+        else button:SetPoint("BOTTOMLEFT", native, "BOTTOMLEFT", 250, -30) end
+    else
+        -- No native tab template on this client: a plain button in the same place keeps the roster reachable.
+        button = T.Button(native, "Whispers", 100, 26, function() end)
+        button.fallback = true
+        function button:SetText(value) self.label:SetText(value) end
+        function button:Resize() end
+        if second then button:SetPoint("LEFT", second, "RIGHT", 4, 0)
+        else button:SetPoint("BOTTOMLEFT", native, "BOTTOMLEFT", 250, -30) end
+    end
+    button:SetScript("OnClick", function()
+        if type(PlaySound) == "function" and SOUNDKIT then pcall(PlaySound, SOUNDKIT.IG_CHARACTER_INFO_TAB) end
+        activate()
+    end)
+    button:SetText("Whispers")
+    button:Resize()
+    A.whisperTab = button
+    return button
 end
 
 local function install()
     if native or not LFGParentFrame or type(LFGParentFrame.HookScript) ~= "function" then return end
     native = LFGParentFrame
-    native:HookScript("OnShow", function() manuallyClosed = false; U.Show() end)
-    native:HookScript("OnHide", function() pending = false; if frame then frame:Hide() end end)
-    native:HookScript("OnSizeChanged", anchor)
-    if native:IsShown() then U.Show() end
+    tab = createTab()
+    -- Hooks only: the native scripts, tab bookkeeping and tab count stay untouched.
+    native:HookScript("OnHide", function() deactivate(); hideMenus() end)
+    for index = 1, 2 do
+        local other = nativeTab(index)
+        if other and type(other.HookScript) == "function" then other:HookScript("OnClick", deactivate) end
+    end
+    for _, frame in ipairs(nativeContent()) do
+        if type(frame.HookScript) == "function" then frame:HookScript("OnShow", deactivate) end
+    end
+    U.Refresh()
+end
+
+---------------------------------------------------------------------------
+-- Public API
+---------------------------------------------------------------------------
+
+-- Shows the Group Finder on the Whispers tab.
+function U.Open()
+    if not initialized then return false end
+    install()
+    if not native then A.Print("The Looking For Group window is not available yet. Open it once, then try again."); return false end
+    if not native:IsShown() then
+        if type(ShowUIPanel) == "function" then pcall(ShowUIPanel, native) end
+        if not native:IsShown() then native:Show() end
+    end
+    activate()
+    return true
+end
+
+function U.OpenSettings()
+    if InCombatLockdown() then A.Print("Collector settings are unavailable during combat."); return end
+    if U.Open() then showSettings() end
 end
 
 function U.Event(event)
     if not initialized then return end
-    if event == "PLAYER_REGEN_DISABLED" then
-        if frame and frame.copy then frame.copy:Hide() end
-    elseif event == "PLAYER_REGEN_ENABLED" and pending and native and native:IsShown() then U.Show() end
+    if event == "PLAYER_REGEN_DISABLED" and panel and panel.copy then panel.copy:Hide() end
     install()
 end
 
@@ -1716,23 +1735,11 @@ function U.Initialize()
     if initialized then return end
     initialized = true
     W.SetChangedCallback(function()
-        if not frame or not frame:IsShown() or frame.refreshQueued then return end
+        if queued then return end
         if C_Timer and C_Timer.After then
-            frame.refreshQueued = true
-            C_Timer.After(.05, function() frame.refreshQueued = false; U.Refresh() end)
+            queued = true
+            C_Timer.After(.05, function() queued = false; U.Refresh() end)
         else U.Refresh() end
-    end)
-    local displayEvents = CreateFrame("Frame")
-    displayEvents:RegisterEvent("UI_SCALE_CHANGED")
-    displayEvents:RegisterEvent("DISPLAY_SIZE_CHANGED")
-    displayEvents:SetScript("OnEvent", anchor)
-    local portraitEvents, portraitQueued = CreateFrame("Frame"), false
-    for _, event in ipairs({ "GROUP_ROSTER_UPDATE", "UNIT_PORTRAIT_UPDATE", "PLAYER_TARGET_CHANGED" }) do portraitEvents:RegisterEvent(event) end
-    portraitEvents:SetScript("OnEvent", function()
-        if portraitQueued or not frame or not frame:IsShown() then return end
-        portraitQueued = true
-        local function run() portraitQueued = false; U.RepaintPortraits() end
-        if C_Timer and C_Timer.After then C_Timer.After(.1, run) else run() end
     end)
     install()
 end

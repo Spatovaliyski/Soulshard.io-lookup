@@ -2,7 +2,10 @@ local _, A = ...
 local P = {}
 A.WhisperProfiles = P
 
-local urlLimit, playerLimit = 2000, 20
+-- Mirror the website: one bulk page holds `bulkLimit` characters and its link may be `bulkUrlLimit` characters long
+-- (frontend/src/models/BulkInspectModel.ts and frontend/src/lib/bulkLink.ts). A link names one realm, so players from
+-- several realms, or a list past either limit, still need more than one link.
+local urlLimit, playerLimit = 6000, 100
 local origin = "https://soulshard.io"
 
 local function accessible(value)
@@ -88,6 +91,46 @@ end
 
 function P.Contexts()
     return A.raidLibrary or {}
+end
+
+-- Raid library ids by the letters of an activity name. The listing API names activities in the client's language,
+-- so a name that matches none of these stays unrecognised and the raid-parse picker asks the player instead.
+local raidNames = {
+    karazhan = { "karazhan" }, gruul = { "gruul" }, magtheridon = { "magtheridon" }, ssc = { "serpentshrine" },
+    ["tempest-keep"] = { "tempestkeep" }, hyjal = { "hyjal" }, ["black-temple"] = { "blacktemple" },
+    ["zul-aman"] = { "zulaman" }, sunwell = { "sunwell" },
+}
+-- Filled from an in-game dump of C_LFGList.GetActiveEntryInfo() activity ids when names alone are not enough.
+P.activityRaids = {}
+
+local function letters(value)
+    return type(value) == "string" and (lower(value):gsub("[^a-z]", "")) or ""
+end
+
+-- The raid-library entry for the first listed activity this addon recognises, or nil.
+function P.RaidForActivities(activityIDs)
+    if type(activityIDs) ~= "table" then return nil end
+    local function entry(id)
+        for _, raid in ipairs(P.Contexts()) do if raid.id == id then return raid end end
+    end
+    for _, activityID in ipairs(activityIDs) do
+        local mapped = P.activityRaids[activityID]
+        if mapped and entry(mapped) then return entry(mapped) end
+        local info
+        if C_LFGList and type(C_LFGList.GetActivityInfoTable) == "function" then
+            local ok, value = pcall(C_LFGList.GetActivityInfoTable, activityID)
+            if ok and type(value) == "table" then info = value end
+        end
+        if info then
+            local name = letters(info.fullName) .. "|" .. letters(info.shortName)
+            for id, fragments in pairs(raidNames) do
+                for _, fragment in ipairs(fragments) do
+                    if name:find(fragment, 1, true) and entry(id) then return entry(id) end
+                end
+            end
+        end
+    end
+    return nil
 end
 
 function P.AgeLabel(timestamp)
@@ -210,7 +253,7 @@ end
 function P.BuildExport(records, selectedKeys, currentEpoch)
     local selected = false
     for _, enabled in pairs(selectedKeys or {}) do if enabled then selected = true; break end end
-    local result = { urls = {}, count = 0, excluded = {}, earlierCount = 0, scopeCount = 0 }
+    local result = { urls = {}, counts = {}, count = 0, excluded = {}, earlierCount = 0, scopeCount = 0 }
     local groups, groupKeys, seen = {}, {}, {}
     for _, record in ipairs(records) do
         if not selected or selectedKeys[record.key] then
@@ -239,20 +282,21 @@ function P.BuildExport(records, selectedKeys, currentEpoch)
         end)
         local base = origin .. "/inspect/bulk/classic-anni/" .. key .. "/"
         local batch, length = {}, #base
+        local function flush()
+            if #batch == 0 then return end
+            result.urls[#result.urls + 1] = base .. table.concat(batch, "+")
+            result.counts[#result.counts + 1] = #batch
+            batch, length = {}, #base
+        end
         for _, name in ipairs(names) do
             local encoded = encode(name)
             if #base + #encoded > urlLimit then return nil, "A character identity exceeds the bulk URL limit." end
-            local separator = #batch > 0 and 1 or 0
-            if #batch >= playerLimit or length + separator + #encoded > urlLimit then
-                result.urls[#result.urls + 1] = base .. table.concat(batch, "+")
-                batch, length = {}, #base
-                separator = 0
-            end
+            if #batch >= playerLimit or length + (#batch > 0 and 1 or 0) + #encoded > urlLimit then flush() end
+            length = length + (#batch > 0 and 1 or 0) + #encoded
             batch[#batch + 1] = encoded
-            length = length + separator + #encoded
             result.count = result.count + 1
         end
-        if #batch > 0 then result.urls[#result.urls + 1] = base .. table.concat(batch, "+") end
+        flush()
     end
     return result
 end
