@@ -68,7 +68,8 @@ end
 -- `recorded = false` so the UI can say the evidence was not preserved.
 function G.Audit(section)
     local audit = { recorded = false, enchants = {}, sockets = {}, unknownEnchants = 0, unknownSockets = 0, marks = {}, checked = 0 }
-    if not section or not section.data or section.source ~= "live" then return audit end
+    -- Enchant and socket rules are TBC's; Forever's are unvalidated, so it reports no findings.
+    if A.forever or not section or not section.data or section.source ~= "live" then return audit end
     audit.recorded = true
     for _, entry in ipairs(section.data.slots) do
         local item = entry.item

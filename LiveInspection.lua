@@ -7,6 +7,12 @@ local contextDepth = 0
 local observedRequest = false
 local FRESHNESS, RESPONSE_TIMEOUT, CACHE_LIMIT = 10, 5, 150
 
+-- Retail-style clients may only expose the namespaced reader.
+local function GetItemInfo(...)
+    local read = (A.forever and C_Item and C_Item.GetItemInfo) or _G.GetItemInfo
+    return read(...)
+end
+
 -- Inspect permission can disappear during combat; proximity still selects live data.
 local function unitGuid(unit)
     if type(unit) ~= "string" or unit == "" then return end
@@ -192,6 +198,8 @@ local weights = { INVTYPE_RELIC = .3164, INVTYPE_TRINKET = .5625, INVTYPE_2HWEAP
 local scoringSlots = { 1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18 }
 
 local function gearScore(links, missing, class)
+    -- The tacotip formula is calibrated for TBC items; Forever has no validated score yet.
+    if A.forever then return end
     local items, count = {}, 0
     for _, slot in ipairs(scoringSlots) do
         local link = links[slot]
@@ -229,7 +237,118 @@ local function gearScore(links, missing, class)
 end
 
 
+local function readable(value)
+    if issecretvalue and issecretvalue(value) then return nil end
+    return value
+end
+
+local function sortedUnique(values)
+    local seen, list = {}, {}
+    for _, value in ipairs(values) do
+        if not seen[value] then seen[value] = true; list[#list + 1] = value end
+    end
+    table.sort(list)
+    return list
+end
+
+-- Position nodes on the catalog grid: columns left to right, rows top to bottom (or flipped).
+local function placeForever(entries, definition, flip)
+    local xs, ys = {}, {}
+    for _, entry in ipairs(entries) do xs[#xs + 1] = entry.x; ys[#ys + 1] = entry.y end
+    xs, ys = sortedUnique(xs), sortedUnique(ys)
+    local columnOf, rowOf = {}, {}
+    for index, value in ipairs(xs) do columnOf[value] = index - 1 end
+    for index, value in ipairs(ys) do rowOf[value] = flip and (#ys - index) or (index - 1) end
+    local lookup = {}
+    for _, node in ipairs(definition.nodes) do lookup[node.row .. ":" .. node.column] = node end
+    local placed, score = {}, 0
+    for _, entry in ipairs(entries) do
+        local row, column = rowOf[entry.y], columnOf[entry.x]
+        local node = lookup[row .. ":" .. column]
+        placed[#placed + 1] = { node = node, entry = entry }
+        if node and (not entry.maximum or entry.maximum == node.maxRank) then score = score + 1 end
+    end
+    return placed, score
+end
+
+-- Forever keeps its TBC-shaped trees in the retail trait system: inspected points arrive as trait
+-- nodes on one canvas. Position, not name, maps each node to the catalog; the shape is validated.
+local function captureForeverTalents(unit, snapshot)
+    local catalog = A.catalogs[snapshot.summary.classToken]
+    if not catalog or not C_Traits or not C_Traits.GetConfigInfo or not C_Traits.GetTreeNodes or not C_Traits.GetNodeInfo then return end
+    local configID
+    if UnitIsUnit(unit, "player") then
+        configID = C_ClassTalents and C_ClassTalents.GetActiveConfigID and C_ClassTalents.GetActiveConfigID()
+    else
+        configID = Constants and Constants.TraitConsts and Constants.TraitConsts.INSPECT_TRAIT_CONFIG_ID or -1
+    end
+    configID = readable(configID)
+    if not configID then return end
+    local config = readable(C_Traits.GetConfigInfo(configID))
+    local treeIDs = config and readable(config.treeIDs)
+    if type(treeIDs) ~= "table" or #treeIDs == 0 then return end
+    local nodes, xs, purchased = {}, {}, 0
+    for _, treeID in ipairs(treeIDs) do
+        for _, nodeID in ipairs(C_Traits.GetTreeNodes(readable(treeID)) or {}) do
+            local node = C_Traits.GetNodeInfo(configID, readable(nodeID))
+            local x, y = node and readable(node.posX), node and readable(node.posY)
+            if type(x) == "number" and type(y) == "number" then
+                local entry = { x = x, y = y, bought = tonumber(readable(node.ranksPurchased)) or 0,
+                    active = tonumber(readable(node.activeRank)) or 0, maximum = tonumber(readable(node.maxRanks)) }
+                purchased = purchased + entry.bought
+                nodes[#nodes + 1] = entry
+                xs[#xs + 1] = x
+            end
+        end
+    end
+    if #nodes == 0 then return end
+    -- Some inspect data carries only the active rank.
+    for _, entry in ipairs(nodes) do entry.rank = purchased > 0 and entry.bought or entry.active end
+    -- Trees sit side by side; a gap much wider than the usual column step starts the next tree.
+    local columns = sortedUnique(xs)
+    local gaps = {}
+    for index = 2, #columns do gaps[#gaps + 1] = columns[index] - columns[index - 1] end
+    table.sort(gaps)
+    local usual = gaps[math.ceil(#gaps / 2)] or 0
+    local treeOf, treeCount = {}, 1
+    for index, x in ipairs(columns) do
+        if index > 1 and columns[index] - columns[index - 1] > usual * 1.5 then treeCount = treeCount + 1 end
+        treeOf[x] = treeCount
+    end
+    if treeCount ~= #catalog then return end
+    local groups = {}
+    for index = 1, treeCount do groups[index] = {} end
+    for _, entry in ipairs(nodes) do local group = groups[treeOf[entry.x]]; group[#group + 1] = entry end
+    local trees, unmatched, partial, total = {}, {}, false, 0
+    for treeIndex, definition in ipairs(catalog) do
+        local placed, score = placeForever(groups[treeIndex], definition, false)
+        local flipped, flippedScore = placeForever(groups[treeIndex], definition, true)
+        if flippedScore > score then placed = flipped end
+        local tree = { treeKey = tostring(treeIndex), points = 0, allocations = {} }
+        local seen = {}
+        for _, item in ipairs(placed) do
+            local node, rank = item.node, item.entry.rank
+            if not A.IsInteger(rank, 0, 5) then return end
+            if not node or seen[node.nodeKey] or rank > node.maxRank or (item.entry.maximum and item.entry.maximum ~= node.maxRank) then
+                partial = true
+                if rank > 0 then table.insert(unmatched, { name = "Talent", rank = rank, description = "Native talent could not be mapped to the catalog." }) end
+            else
+                seen[node.nodeKey] = true
+                tree.points = tree.points + rank
+                if rank > 0 then table.insert(tree.allocations, { nodeKey = node.nodeKey, rank = rank }) end
+            end
+            total = total + rank
+        end
+        for _, node in ipairs(definition.nodes) do if not seen[node.nodeKey] then partial = true end end
+        trees[treeIndex] = tree
+    end
+    if total > math.max(0, snapshot.summary.level) then return end
+    return liveSection({ catalogVersion = A.catalogVersion, classToken = snapshot.summary.classToken,
+        groups = { { active = true, trees = trees } }, unmatched = unmatched, warnings = {} }, partial)
+end
+
 local function captureTalents(unit, snapshot)
+    if A.forever then return captureForeverTalents(unit, snapshot) end
     local catalog = A.catalogs[snapshot.summary.classToken]
     if not catalog or not GetNumTalents then return end
     local modern = C_SpecializationInfo and C_SpecializationInfo.GetTalentInfo
@@ -522,7 +641,7 @@ local function observeReady(guid)
 end
 
 local events = CreateFrame("Frame")
-for _, event in ipairs({ "PLAYER_LOGIN", "ADDON_LOADED", "PLAYER_REGEN_ENABLED", "INSPECT_READY", "GET_ITEM_INFO_RECEIVED", "ITEM_DATA_LOAD_RESULT", "UNIT_INVENTORY_CHANGED", "PLAYER_EQUIPMENT_CHANGED", "PLAYER_TALENT_UPDATE", "ACTIVE_TALENT_GROUP_CHANGED" }) do events:RegisterEvent(event) end
+for _, event in ipairs({ "PLAYER_LOGIN", "ADDON_LOADED", "PLAYER_REGEN_ENABLED", "INSPECT_READY", "GET_ITEM_INFO_RECEIVED", "ITEM_DATA_LOAD_RESULT", "UNIT_INVENTORY_CHANGED", "PLAYER_EQUIPMENT_CHANGED", "PLAYER_TALENT_UPDATE", "ACTIVE_TALENT_GROUP_CHANGED" }) do pcall(events.RegisterEvent, events, event) end
 events:SetScript("OnEvent", function(_, event, value)
     installInspectHook()
     if event == "INSPECT_READY" then observeReady(value)

@@ -7,6 +7,13 @@ end
 local displayRealm = A.DisplayRealm
 
 function A.LookupURL(name, realm)
+    if A.forever then
+        -- Forever has no realms: a character is region plus the lowercase name slug.
+        local region = A.Region()
+        if not region or type(name) ~= "string" or name == "" or name:find("[%c|]") then return end
+        local slug = (name:match("^([^-]+)%-") or name):lower():gsub("%s+", "-")
+        return "https://soulshard.io/inspect/character/forever/" .. region .. "/" .. encode(slug)
+    end
     local identity = A.LookupIdentity(name, realm)
     if not identity then return end
     return "https://soulshard.io/inspect/character/classic-anni/" .. identity.region .. "/" .. encode(identity.realmSlug) .. "/" .. encode(identity.name)
@@ -95,7 +102,7 @@ local function addTooltip(tooltip)
     local score = equipment and equipment.data.gearScore and equipment.data.gearScore.value
     tooltip:AddLine("Soulshard Lookup", 1, .82, .3)
     if score then tooltip:AddDoubleLine("GearScore (live)", tostring(score), .88, .86, .91, 1, .82, .3)
-    elseif snapshot then tooltip:AddLine(A.Text(snapshot.message or "Live GearScore unavailable."), .62, .59, .68, true) end
+    elseif snapshot and not A.forever then tooltip:AddLine(A.Text(snapshot.message or "Live GearScore unavailable."), .62, .59, .68, true) end
     local talents = snapshot and snapshot.sections.talents
     if talents then
         local points, highest, spec = {}, -1, ""
@@ -176,7 +183,7 @@ local function installMenu()
             root:CreateDivider()
             root:CreateTitle("Soulshard Lookup")
             root:CreateButton("Soulshard Web Lookup", function() A.ShowLookupURL(name, realm) end)
-            local ingame = root:CreateButton("Ingame Lookup (" .. (score and tostring(score.value) or "-") .. "gs)", function()
+            local ingame = root:CreateButton("Ingame Lookup" .. (A.forever and "" or " (" .. (score and tostring(score.value) or "-") .. "gs)"), function()
                 local live = A.GetPlayerContext(identity, context.unit, 1)
                 if live then A.ShowPlayerProfile(live.unit)
                 elseif character then A.ShowProfile(identity)
@@ -218,5 +225,12 @@ for _, event in ipairs({ "PLAYER_LOGIN", "ADDON_LOADED", "PLAYER_REGEN_ENABLED" 
 events:SetScript("OnEvent", function() installInspectButton(); installMenu() end)
 if GameTooltip and GameTooltip.HookScript then
     GameTooltip:HookScript("OnTooltipCleared", function(self) self.soulshardAdded = nil end)
-    GameTooltip:HookScript("OnTooltipSetUnit", addTooltip)
+    -- Retail-style clients dropped the OnTooltipSetUnit script for tooltip data post-calls.
+    if A.forever and TooltipDataProcessor and TooltipDataProcessor.AddTooltipPostCall and Enum and Enum.TooltipDataType then
+        TooltipDataProcessor.AddTooltipPostCall(Enum.TooltipDataType.Unit, function(tooltip)
+            if tooltip == GameTooltip then addTooltip(tooltip) end
+        end)
+    else
+        GameTooltip:HookScript("OnTooltipSetUnit", addTooltip)
+    end
 end

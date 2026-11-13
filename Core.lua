@@ -2,6 +2,13 @@ local addonName, A = ...
 -- The TOC owns the version. Packaged data releases append a suffix after the numeric part.
 A.version = (C_AddOns and C_AddOns.GetAddOnMetadata or GetAddOnMetadata)(addonName, "Version") or "0.0.0"
 A.interface = 20506
+-- WoW Forever (Camelot) is a retail-style 16xxx client with its own TBC-shaped talent trees.
+-- The TBC data pack and whisper collector never apply to it; live inspection does.
+do
+    local interface = GetBuildInfo and select(4, GetBuildInfo())
+    A.forever = (type(interface) == "number" and interface >= 16000 and interface < 17000)
+        or (WOW_PROJECT_CAMELOT ~= nil and WOW_PROJECT_ID == WOW_PROJECT_CAMELOT) or false
+end
 A.staleAfter = 86400
 A.state = "No saved data installed. Install an exported Data folder and restart WoW."
 
@@ -33,8 +40,11 @@ events:RegisterEvent("PLAYER_REGEN_ENABLED")
 events:SetScript("OnEvent", function(_, event, name)
     if event == "PLAYER_LOGIN" then
         local _, _, _, interface = GetBuildInfo()
+        if A.forever then
+            A.state = "Forever client: live inspection of nearby players. Saved profiles are not available for Forever yet."
+            A.Print(A.state)
         -- Packed data indexes across frames and reports when it is published.
-        if A.LoadData(A.pack, interface, true, function()
+        elseif A.LoadData(A.pack, interface, true, function()
             A.Print(A.state)
             if A.WhisperUI then A.WhisperUI.Refresh() end
         end) ~= nil then A.Print(A.state) end
@@ -77,6 +87,11 @@ SlashCmdList.SOULSHARDLOOKUP = function(message)
         A.Print("Client " .. tostring(version) .. " build " .. tostring(build) .. " " .. tostring(buildDate) .. " interface " .. tostring(interface))
         A.Print("Project " .. tostring(WOW_PROJECT_ID) .. "; locale " .. GetLocale() .. "; region " .. tostring(GetCurrentRegion()) .. "; realm " .. GetRealmName())
         A.Print("Browse hook " .. tostring(type(LFGBrowseSearchEntry_Update)) .. "; LFG " .. tostring(A.lfgState))
+        if A.forever then
+            local player = UnitFullName and { UnitFullName("player") } or {}
+            A.Print("Forever: C_Traits " .. tostring(C_Traits and C_Traits.GetConfigInfo ~= nil) .. "; GetNumTalents " .. tostring(GetNumTalents ~= nil) ..
+                "; catalog " .. tostring(A.catalogVersion) .. "; player " .. tostring(player[1]) .. " / " .. tostring(player[2]) .. " / " .. GetRealmName())
+        end
         if A.Whispers then
             local status = A.Whispers.GetStatus()
             A.Print("Whisper Collector: " .. status.label .. "; " .. tostring(status.reason or status.state))
