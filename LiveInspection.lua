@@ -15,23 +15,39 @@ end
 
 -- Inspect permission can disappear during combat; proximity still selects live data.
 local function unitGuid(unit)
-    if type(unit) ~= "string" or unit == "" then return end
+    if A.Secret(unit) or type(unit) ~= "string" or unit == "" then return end
     local ok, guid = pcall(function()
-        if UnitExists and not UnitExists(unit) then return end
-        if not UnitIsPlayer(unit) then return end
-        return UnitGUID(unit)
+        local exists, player = UnitExists and UnitExists(unit), UnitIsPlayer(unit)
+        if A.Secret(exists, player) or (UnitExists and not exists) or not player then return end
+        local value = UnitGUID(unit)
+        if not A.Secret(value) then return value end
     end)
     return ok and guid or nil
 end
 
+-- UnitIsUnit can return a secret boolean for restricted units; treat that as "not the same".
+local function sameUnit(left, right)
+    local ok, same = pcall(UnitIsUnit, left, right)
+    return ok and not A.Secret(same) and same == true
+end
+
+-- CheckInteractDistance is protected in combat: each call is a blocked action even under pcall,
+-- so combat reuses the last out-of-combat answer instead of asking the client.
+local proximity, proximityCount = {}, 0
 local function nearby(unit)
-    if not unitGuid(unit) then return false end
-    if UnitIsUnit(unit, "player") then return true end
-    if CheckInteractDistance then
-        local ok, close = pcall(CheckInteractDistance, unit, 1)
-        return ok and close or false
+    local guid = unitGuid(unit)
+    if not guid then return false end
+    if sameUnit(unit, "player") then return true end
+    if InCombatLockdown() then return proximity[guid] == true end
+    if not CheckInteractDistance then return false end
+    local ok, close = pcall(CheckInteractDistance, unit, 1)
+    close = ok and not A.Secret(close) and close == true
+    if proximity[guid] == nil then
+        proximityCount = proximityCount + 1
+        if proximityCount > 200 then proximity, proximityCount = {}, 1 end
     end
-    return false
+    proximity[guid] = close
+    return close
 end
 
 function A.DisplayRealm(realm)
@@ -47,7 +63,7 @@ end
 function A.PlayerName(unit)
     if not unitGuid(unit) then return end
     local name, realm = UnitFullName(unit)
-    if type(name) ~= "string" or name == "" then return end
+    if A.Secret(name, realm) or type(name) ~= "string" or name == "" then return end
     return name, A.DisplayRealm(realm and realm ~= "" and realm or GetRealmName())
 end
 
@@ -129,7 +145,7 @@ end
 
 local function refreshLevel(snapshot, unit)
     local level = UnitLevel and UnitLevel(unit)
-    if A.IsInteger(level, 1, 255) and snapshot.summary.level ~= level then
+    if not A.Secret(level) and A.IsInteger(level, 1, 255) and snapshot.summary.level ~= level then
         snapshot.summary.level = level
         changed(snapshot)
     end
@@ -143,11 +159,16 @@ local function snapshotFor(unit)
         local name, realm = A.PlayerName(unit)
         if not name then return end
         local _, class = UnitClass(unit)
+        local level = UnitLevel and UnitLevel(unit)
+        local race = UnitRace and UnitRace(unit)
+        local faction = UnitFactionGroup and UnitFactionGroup(unit)
+        local guild = GetGuildInfo and GetGuildInfo(unit)
+        if A.Secret(class) then return end
         snapshot = { guid = guid, at = -10, sections = {}, generation = 0, realm = realm,
             identity = A.ResolveName(name, realm) or { name = name, realmName = realm, region = A.Region(), realmKey = (A.Region() or "") .. "/" .. realm },
-            summary = { classToken = class or "", level = UnitLevel and math.max(0, UnitLevel(unit)) or 0,
-                race = UnitRace and UnitRace(unit) or "", faction = UnitFactionGroup and UnitFactionGroup(unit) or "",
-                guild = GetGuildInfo and GetGuildInfo(unit) or nil }, message = "Inspecting nearby player…" }
+            summary = { classToken = class or "", level = (not A.Secret(level) and type(level) == "number") and math.max(0, level) or 0,
+                race = not A.Secret(race) and race or "", faction = not A.Secret(faction) and faction or "",
+                guild = not A.Secret(guild) and guild or nil }, message = "Inspecting nearby player…" }
         snapshots[guid] = snapshot
         local count, oldest = 0, nil
         for key, value in pairs(snapshots) do
@@ -277,7 +298,7 @@ local function captureForeverTalents(unit, snapshot)
     local catalog = A.catalogs[snapshot.summary.classToken]
     if not catalog or not C_Traits or not C_Traits.GetConfigInfo or not C_Traits.GetTreeNodes or not C_Traits.GetNodeInfo then return end
     local configID
-    if UnitIsUnit(unit, "player") then
+    if sameUnit(unit, "player") then
         configID = C_ClassTalents and C_ClassTalents.GetActiveConfigID and C_ClassTalents.GetActiveConfigID()
     else
         configID = Constants and Constants.TraitConsts and Constants.TraitConsts.INSPECT_TRAIT_CONFIG_ID or -1
@@ -353,7 +374,7 @@ local function captureTalents(unit, snapshot)
     if not catalog or not GetNumTalents then return end
     local modern = C_SpecializationInfo and C_SpecializationInfo.GetTalentInfo
     if not modern and not GetTalentInfo then return end
-    local inspect = not UnitIsUnit(unit, "player")
+    local inspect = not sameUnit(unit, "player")
     local active = C_SpecializationInfo and C_SpecializationInfo.GetActiveSpecGroup or GetActiveTalentGroup
     local group = active and active(inspect, false) or 1
     local trees, unmatched, partial, total = {}, {}, false, 0
@@ -548,7 +569,7 @@ local function getPlayerContext(identity, unit, priority)
     if not identity then rememberObservation(snapshot.identity, unit) end
     if priority then
         installInspectHook()
-        if UnitIsUnit(unit, "player") then
+        if sameUnit(unit, "player") then
             if GetTime() - snapshot.at >= FRESHNESS then collect({ self = true, snapshot = snapshot, guid = snapshot.guid, unit = unit }) end
         else enqueue(snapshot, priority); dispatch() end
     end
@@ -621,7 +642,7 @@ installInspectHook = function()
 end
 
 local function observeReady(guid)
-    if type(guid) ~= "string" then return end
+    if A.Secret(guid) or type(guid) ~= "string" then return end
     if owner and owner.guid ~= guid then return end
     local unit = guidUnit(guid, owner and owner.unit)
     if not unit then return end
@@ -655,7 +676,7 @@ events:SetScript("OnEvent", function(_, event, value)
         local guid = unitGuid(value)
         local snapshot = guid and snapshots[guid]
         if snapshot then
-            if UnitIsUnit(value, "player") then collect({ self = true, snapshot = snapshot, guid = guid, unit = value })
+            if sameUnit(value, "player") then collect({ self = true, snapshot = snapshot, guid = guid, unit = value })
             else
                 local priority = owner and owner.guid == guid and owner.priority or 3
                 if owner and owner.guid == guid then owner = nil; epoch = epoch + 1 end
@@ -721,14 +742,14 @@ events:SetScript("OnUpdate", function(_, delta)
         elseif unit == "mouseover" then priority = 2
         elseif unit == "target" or unit == "focus" then priority = 3
         elseif unit:match("^party%d+$") or unit:match("^raid%d+$") then priority = 4 end
-        if priority and nearby(unit) and not UnitIsUnit(unit, "player") then
+        if priority and nearby(unit) and not sameUnit(unit, "player") then
             local snapshot = snapshotFor(unit)
             if snapshot and (priority ~= 4 or not snapshot.captured) then enqueue(snapshot, priority) end
         end
     end
     if A.profile and A.profile:IsShown() and A.profile.view == "profile" and A.profile.profileIdentity then
         local unit = A.FindNearbyUnit(A.profile.profileIdentity)
-        if unit and not UnitIsUnit(unit, "player") then enqueue(snapshotFor(unit), 1) end
+        if unit and not sameUnit(unit, "player") then enqueue(snapshotFor(unit), 1) end
     end
     if demandElapsed >= 1 then
         demandElapsed = 0
@@ -737,7 +758,7 @@ events:SetScript("OnUpdate", function(_, delta)
     end
     if GameTooltip and GameTooltip.GetUnit and GameTooltip:IsShown() then
         local _, unit = GameTooltip:GetUnit()
-        if nearby(unit) and not UnitIsUnit(unit, "player") then enqueue(snapshotFor(unit), 2) end
+        if nearby(unit) and not sameUnit(unit, "player") then enqueue(snapshotFor(unit), 2) end
     end
     dispatch()
     local refreshAll = false

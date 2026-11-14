@@ -17,14 +17,35 @@ local raidWidth, viewWidth = 195, 116
 local headerTop, headerHeight = 133, 20
 local listTop, listHeight = 155, 254
 local buttonLeft, buttonRight, buttonBottom, buttonHeight = 19, 40, 79, 22
+local gearRight, gearTop = 37, 41
+local playerHeight, headingHeight, sectionGap, poolSize = 38, 24, 6, 12
+-- Each player sits on its own card; this much of the frame shows above it, so neighbouring cards stay apart.
+local cardGap = 6
+-- Settings opens beside the frame: the native window is about 353 wide, so its pop-up starts just past that.
+local popupLeft, popupTop = 358, 8
+-- WoW Forever's Group Finder is 458 by 535 and modern style (Blizzard_GroupFinder_VanillaStyle/Mainline, LFGWhoListFrame):
+-- a stone header strip at y 21..73 beside the portrait, the dark groupfinder art from y 80 to the bottom edge, a scroll
+-- line under the column header and another 42 above the bottom. The roster follows the Who page's list box (x 16..426).
+if A.forever then
+    frameLeft, frameWidth = 16, 418
+    bannerX, bannerTop, bannerWidth = 62, 27, 330
+    -- Select all (left) and the view dropdown (right) share one row, both centred on y 100.
+    dropdownLeft, dropdownTop = 16, 88
+    headerTop = 90
+    -- Forever has no bulk search, so there is no button row: the list runs down to the inset's bottom edge.
+    listTop, listHeight = 120, 400
+    buttonLeft, buttonRight, buttonBottom = 16, 16, 12
+    gearRight, gearTop = 18, 32
+    poolSize = 18
+    popupLeft = 462
+end
 local trackWidth = 6
 local viewportWidth, viewportHeight = frameWidth, listHeight
 local rowWidth = viewportWidth - trackWidth - 6
-local playerHeight, headingHeight, sectionGap, poolSize = 42, 26, 8, 12
--- Settings opens beside the frame: the native window is about 353 wide, so its pop-up starts just past that.
-local popupLeft, popupTop = 358, 8
 -- Right-aligned metric columns: GearScore, average parse, best parse.
 local gsWidth, parseWidth, columnGap, columnEdge = 44, 30, 2, 4
+-- The last whisper's age sits at the right end of the preview line.
+local timeWidth = 40
 local bestX = rowWidth - columnEdge - parseWidth
 local avgX = bestX - columnGap - parseWidth
 local gsX = avgX - columnGap - gsWidth
@@ -94,6 +115,8 @@ end
 
 local function displayName(identity)
     if identity.displayName then return identity.displayName end
+    -- Forever has no player-facing realms; its server names ("CAMWOWEU5Realm2PvP") are noise.
+    if A.forever then return identity.name or "Unresolved player" end
     return (identity.name or "Unresolved player") .. (identity.realmName and ("-" .. identity.realmName) or "")
 end
 
@@ -181,11 +204,12 @@ local function caret(parent, color)
     return holder
 end
 
--- Fold glyph: a bordered square holding a minus, or a plus while folded.
+-- Fold glyph: a bare minus, or a plus while folded.
 local function foldGlyph(parent)
-    local glyph = T.Panel(parent, 16, 16, true)
-    fill(glyph, 3, 7, 8, 2, T.gold, 1, "OVERLAY")
-    glyph.vertical = fill(glyph, 6, 4, 2, 8, T.gold, 1, "OVERLAY")
+    local glyph = CreateFrame("Frame", nil, parent)
+    glyph:SetSize(12, 12)
+    fill(glyph, 2, 5, 8, 2, T.muted, 1, "OVERLAY")
+    glyph.vertical = fill(glyph, 5, 2, 2, 8, T.muted, 1, "OVERLAY")
     function glyph:SetFolded(isFolded) self.vertical:SetShown(isFolded) end
     return glyph
 end
@@ -275,7 +299,7 @@ local statusCopy = {
     viewing = { "good", "Viewing", "Sign-ups shared by your group's leaders. Read only." },
     ["not-listed"] = { "warn", "Paused", "List your group in Looking For Group to collect." },
     disabled = { "off", "Off", "Collection is switched off in Settings." },
-    ["unsupported-client"] = { "bad", "Unavailable", "Requires the TBC Anniversary client (20506)." },
+    ["unsupported-client"] = { "bad", "Unavailable", "Requires the TBC Anniversary (20506) or Forever client." },
     ["storage-incompatible"] = { "bad", "Unavailable", "Saved data needs a newer version of the addon." },
 }
 local tones = { good = T.good, warn = T.gold, bad = T.danger, off = T.muted }
@@ -577,15 +601,16 @@ local function rowTooltip(row)
     -- A shared row never had the whisper text; only the leader who received it ever sees that.
     if record.remote then GameTooltip:AddLine(A.Text("Shared by " .. (record.reporter or "your group's leader")), .88, .86, .91, true)
     else GameTooltip:AddLine(A.Text(record.lastMessage and ("“" .. record.lastMessage .. "”") or "Preview unavailable after reload."), .88, .86, .91, true) end
-    if not W.IsReadOnly() then GameTooltip:AddLine("Right-click for actions", .57, .54, .61) end
+    if not W.IsReadOnly() then GameTooltip:AddLine(A.forever and "Click for actions" or "Right-click for actions", .57, .54, .61) end
     GameTooltip:Show()
 end
 
 -- The target is what the sender's own whisper would have carried: a bare name on this realm, otherwise
--- Name-Realm with the spaces Blizzard strips from realm names removed.
+-- Name-Realm with the spaces Blizzard strips from realm names removed. Forever has no player-facing realms:
+-- its server names ("CAMWOWEU5Realm6PvP") are rejected as targets, so names there stay bare.
 local function chatTarget(identity)
     if type(identity.name) ~= "string" then return nil end
-    if not identity.realmName or sameRealm(identity.realmName) then return identity.name end
+    if A.forever or not identity.realmName or sameRealm(identity.realmName) then return identity.name end
     return identity.name .. "-" .. (identity.realmName:gsub("%s", ""))
 end
 
@@ -612,6 +637,11 @@ local function setKeys(keys, selectedState)
     end
 end
 
+-- Ticking players only feeds Bulk Search, which a viewer cannot use and Forever does not have.
+local function selectable()
+    return not W.IsReadOnly() and not A.forever
+end
+
 local function openRowMenu(row)
     local entry = row.entry
     if not entry then return end
@@ -631,7 +661,8 @@ end
 local function clickRow(row, button)
     local entry = row.entry
     if not entry or W.IsReadOnly() then return end
-    if button == "RightButton" then openRowMenu(row); return end
+    -- Without check boxes a plain click opens the actions too.
+    if button == "RightButton" or not selectable() then openRowMenu(row); return end
     local key = entry.record.key
     if type(IsShiftKeyDown) == "function" and IsShiftKeyDown() and anchorKey then
         local from, to
@@ -659,20 +690,42 @@ end
 local function createPlayerRow(parent)
     local row = CreateFrame("Button", nil, parent)
     row:SetSize(rowWidth, playerHeight)
+    -- The card: a raised surface, a class-coloured wash fading in from a left accent bar, a light top edge and a dark
+    -- bottom edge. Selection adds a gold wash and outline.
+    row.card = fill(row, 0, 0, rowWidth, playerHeight, T.raised, .58, "BACKGROUND")
+    row.tint = row:CreateTexture(nil, "BACKGROUND", nil, 1)
+    row.tint:SetPoint("TOPLEFT", 0, 0)
+    row.tint:SetSize(math.floor(rowWidth * .6), playerHeight)
+    row.tint:SetColorTexture(1, 1, 1, 1)
+    row.picked = fill(row, 0, 0, rowWidth, playerHeight, T.gold, .1, "BORDER")
+    row.outline = {
+        fill(row, 0, 0, rowWidth, 1, T.gold, .55, "BORDER"),
+        fill(row, 0, playerHeight - 1, rowWidth, 1, T.gold, .55, "BORDER"),
+        fill(row, rowWidth - 1, 0, 1, playerHeight, T.gold, .55, "BORDER"),
+    }
+    row.top = fill(row, 0, 0, rowWidth, 1, T.hair, .08, "BORDER")
+    row.bottom = fill(row, 0, playerHeight - 1, rowWidth, 1, { 0, 0, 0 }, .55, "BORDER")
+    row.accent = fill(row, 0, 0, 2, playerHeight, T.gold, .9, "ARTWORK")
+    row.hover = row:CreateTexture(nil, "HIGHLIGHT")
+    row.hover:SetAllPoints(row)
+    row.hover:SetColorTexture(1, 1, 1, .05)
     row.box = checkbox(row)
     row.icon = row:CreateTexture(nil, "ARTWORK")
     row.icon:SetSize(16, 16)
+    -- A player the roster has not shown yet gets a gold dot in the left gutter.
+    row.new = T.Disc(row, "TOPLEFT", 9, -9, 6, T.gold, 1, "OVERLAY")
     row.name = Label(row, 14, T.cream)
-    row.name:SetSize(100, 20)
+    row.name:SetSize(100, 18)
     row.name:SetMaxLines(1)
     if row.name.SetWordWrap then row.name:SetWordWrap(false) end
     row.preview = Label(row, 13, T.muted)
     row.preview:SetSize(100, 18)
     row.preview:SetMaxLines(1)
     if row.preview.SetWordWrap then row.preview:SetWordWrap(false) end
+    row.time = text(row, 13, T.dim, rowWidth - columnEdge - timeWidth, 20, timeWidth, 18, "RIGHT")
     for _, spec in ipairs({ { "gs", gsX, gsWidth }, { "avg", avgX, parseWidth }, { "best", bestX, parseWidth } }) do
         local region = Label(row, 14, T.gold)
-        region:SetPoint("TOPLEFT", spec[2], -5)
+        region:SetPoint("TOPLEFT", spec[2], -3)
         region:SetSize(spec[3], 20)
         region:SetMaxLines(1)
         region:SetJustifyH("RIGHT")
@@ -695,14 +748,12 @@ local function createHeading(parent)
     head.box:SetPoint("CENTER")
     head.icon = head:CreateTexture(nil, "ARTWORK")
     head.icon:SetSize(16, 16)
-    head.icon:SetPoint("LEFT", 30, 0)
     head.name = Label(head, 15, T.cream, true)
-    head.name:SetPoint("LEFT", 52, 0)
     head.name:SetSize(rowWidth - 52 - 34, 20)
     head.name:SetMaxLines(1)
-    head.rule = fill(head, 4, headingHeight - 2, rowWidth - 12, 1, T.gold, .6, "ARTWORK")
+    head.rule = fill(head, 0, headingHeight - 1, rowWidth, 1, T.gold, .3, "ARTWORK")
     head.fold = foldGlyph(head)
-    head.fold:SetPoint("RIGHT", -8, 0)
+    head.fold:SetPoint("RIGHT", -6, 0)
     head:SetScript("OnClick", function(self)
         if not self.token then return end
         folded[self.token] = not folded[self.token] or nil
@@ -728,9 +779,14 @@ local function createSlot(index)
     return slot
 end
 
+-- Forever has neither GearScore nor raid logs, so its roster never shows those columns.
+local function showColumns(settings)
+    return settings.showSnapshots and not A.forever
+end
+
 -- GearScore and parse columns. Unknown is a dash, never zero.
 local function metrics(row, view, settings)
-    local columns = settings.showSnapshots
+    local columns = showColumns(settings)
     for _, region in ipairs({ row.gs, row.avg, row.best }) do region:SetShown(columns) end
     if not columns then return end
     if view.gearScore ~= nil then
@@ -754,13 +810,15 @@ local function metrics(row, view, settings)
     end
 end
 
-local function nameText(record, view, isNew)
+local function nameText(record, view)
     local identity = record.identity
     local result = A.Text(identity.name or "Unresolved player")
-    if identity.realmName and not sameRealm(identity.realmName) then result = result .. mutedHex .. "-" .. A.Text(identity.realmName) .. "|r" end
-    result = result .. mutedHex .. " (" .. (view.level and tostring(view.level) or "—") .. ")  ×" .. (record.count or 0) .. "|r"
+    if identity.realmName and not A.forever and not sameRealm(identity.realmName) then result = result .. mutedHex .. "-" .. A.Text(identity.realmName) .. "|r" end
+    result = result .. mutedHex .. " (" .. (view.level and tostring(view.level) or "—") .. ")"
+    -- One whisper is the norm; only repeats are worth a count.
+    if (record.count or 0) > 1 then result = result .. "  ×" .. record.count end
+    result = result .. "|r"
     if identity.resolution ~= "exact" then result = result .. dangerHex .. "  !|r" end
-    if isNew then result = result .. goldHex .. "  NEW|r" end
     return result
 end
 
@@ -773,47 +831,69 @@ local function paintPlayer(row, item, settings, selected)
         view = { classToken = entry.view.classToken, level = record.level, raceToken = entry.view.raceToken, sex = entry.view.sex }
     elseif contextID then
         entry.full = entry.full or P.Enrich(record, contextID)
-        view = entry.full
+        view = entry.full or view
     end
-    local flat = grouping == "none"
-    local boxX = flat and 4 or 20
-    local nameX = flat and boxX + 46 or boxX + 26
+    -- Left to right: the new-player gutter, the check box, the class icon (flat list only), then the name. Grouped
+    -- names line up with their class heading's name.
+    local flat, pick = grouping == "none", selectable()
+    local x = flat and 16 or (pick and 20 or 26)
     local token = entry.token
     local color = classColor(token ~= "UNKNOWN" and token or nil)
     row.entry, row.record, row.view = entry, record, view
     row.selected = selected[record.key] == true
-    row.box:ClearAllPoints()
-    row.box:SetPoint("TOPLEFT", boxX, -math.floor((playerHeight - 18) / 2))
-    row.box:SetState(row.selected and "on" or "off")
-    row.box:SetShown(not W.IsReadOnly())
+    row.accent:SetColorTexture(color[1], color[2], color[3], .9)
+    row.tint:SetGradient("HORIZONTAL", CreateColor(color[1], color[2], color[3], .13), CreateColor(color[1], color[2], color[3], 0))
+    row.picked:SetShown(row.selected)
+    for _, edge in ipairs(row.outline) do edge:SetShown(row.selected) end
+    row.top:SetShown(not row.selected)
+    row.box:SetShown(pick)
+    if pick then
+        row.box:ClearAllPoints()
+        row.box:SetPoint("TOPLEFT", x, -math.floor((playerHeight - 18) / 2))
+        row.box:SetState(row.selected and "on" or "off")
+        x = x + 26
+    end
     row.icon:SetShown(flat)
     if flat then
         row.icon:ClearAllPoints()
-        row.icon:SetPoint("TOPLEFT", boxX + 24, -13)
+        row.icon:SetPoint("TOPLEFT", x, -math.floor((playerHeight - 16) / 2))
         T.ClassIcon(row.icon, token ~= "UNKNOWN" and token or nil)
+        x = x + 22
     end
+    local nameX = x
+    row.new:ClearAllPoints()
+    row.new:SetPoint("TOPLEFT", flat and 5 or 9, -9)
+    row.new:SetShown(not acknowledged[record.key])
     row.name:ClearAllPoints()
-    row.name:SetPoint("TOPLEFT", nameX, -5)
-    row.name:SetWidth((settings.showSnapshots and gsX or rowWidth - columnEdge) - nameX - 6)
-    row.name:SetText(nameText(record, view, not acknowledged[record.key]))
+    row.name:SetPoint("TOPLEFT", nameX, -3)
+    row.name:SetWidth((showColumns(settings) and gsX or rowWidth - columnEdge) - nameX - 6)
+    row.name:SetText(nameText(record, view))
     row.name:SetTextColor(unpack(color))
+    row.time:SetText(ago(record.lastSeenAt))
     row.preview:ClearAllPoints()
-    row.preview:SetPoint("TOPLEFT", nameX, -23)
-    row.preview:SetWidth(rowWidth - nameX - columnEdge)
-    row.preview:SetText(A.Text(ago(record.lastSeenAt) .. " · " .. (record.remote and ("Shared by " .. (record.reporter or "your group's leader")) or record.lastMessage or "Preview cleared after reload")))
+    row.preview:SetPoint("TOPLEFT", nameX, -20)
+    row.preview:SetWidth(rowWidth - nameX - columnEdge - timeWidth - 6)
+    local message = record.remote and ("Shared by " .. (record.reporter or "your group's leader")) or record.lastMessage
+    row.preview:SetText(A.Text(message or "Preview cleared after reload"))
+    row.preview:SetTextColor(unpack(message and T.muted or T.faint))
     metrics(row, view, settings)
 end
 
 local function paintHeading(head, item, selected)
     local color = classColor(item.token ~= "UNKNOWN" and item.token or nil)
     head.token, head.keys = item.token, item.keys
-    head.select:SetShown(not W.IsReadOnly())
+    local pick = selectable()
+    head.select:SetShown(pick)
+    head.icon:ClearAllPoints()
+    head.icon:SetPoint("LEFT", pick and 30 or 4, 0)
+    head.name:ClearAllPoints()
+    head.name:SetPoint("LEFT", pick and 52 or 26, 0)
     head.allSelected = item.selectedCount == #item.keys and #item.keys > 0
     head.box:SetState(head.allSelected and "on" or (item.selectedCount > 0 and "partial" or "off"))
     T.ClassIcon(head.icon, item.token ~= "UNKNOWN" and item.token or nil)
     head.name:SetText(A.Text(className(item.token)) .. mutedHex .. "  (" .. #item.keys .. ")|r")
     head.name:SetTextColor(unpack(color))
-    head.rule:SetColorTexture(color[1], color[2], color[3], .6)
+    head.rule:SetColorTexture(color[1], color[2], color[3], .3)
     head.fold:SetFolded(folded[item.token] == true)
 end
 
@@ -838,7 +918,7 @@ local function renderList()
             else
                 slot.heading:Hide()
                 slot.row:ClearAllPoints()
-                slot.row:SetPoint("TOPLEFT", 0, 0)
+                slot.row:SetPoint("TOPLEFT", 0, -cardGap)
                 slot.row:Show()
                 paintPlayer(slot.row, item, settings, selected)
             end
@@ -873,7 +953,7 @@ local function buildItems()
     items, order = {}, {}
     if grouping == "none" then
         for _, entry in ipairs(entries) do
-            items[#items + 1] = { kind = "player", entry = entry, height = playerHeight }
+            items[#items + 1] = { kind = "player", entry = entry, height = playerHeight + cardGap }
             order[#order + 1] = entry.record.key
         end
     else
@@ -897,7 +977,7 @@ local function buildItems()
                 }
                 if not folded[token] then
                     for _, entry in ipairs(list) do
-                        items[#items + 1] = { kind = "player", entry = entry, height = playerHeight }
+                        items[#items + 1] = { kind = "player", entry = entry, height = playerHeight + cardGap }
                         order[#order + 1] = entry.record.key
                     end
                 end
@@ -1001,13 +1081,14 @@ local function paintControls(status, settings, total, selectedCount)
     box:SetState(total > 0 and selectedCount == total and "on" or (selectedCount > 0 and "partial" or "off"))
     panel.selectAll.label:SetText(selectedCount > 0 and (selectedCount .. " selected") or (total == 0 and "Nothing to select" or ("Select all (" .. total .. ")")))
     panel.selectAll.label:SetTextColor(unpack(selectedCount > 0 and T.gold or T.muted))
-    for _, caption in ipairs({ panel.captions.gs, panel.captions.avg, panel.captions.best }) do caption:SetShown(settings.showSnapshots) end
+    for _, caption in ipairs({ panel.captions.gs, panel.captions.avg, panel.captions.best }) do caption:SetShown(showColumns(settings)) end
     panel.bulk:SetText(selectedCount > 0 and ("Bulk Search Selected (" .. selectedCount .. ")") or ("Bulk Search (" .. total .. ")"))
     setEnabled(panel.bulk, total > 0)
     -- A viewer sees the roster; choosing, exporting and removing are for the people who run the group.
     local readOnly = W.IsReadOnly()
-    panel.selectAll:SetShown(not readOnly)
-    panel.bulk:SetShown(not readOnly)
+    panel.selectAll:SetShown(selectable())
+    -- The website has no Forever bulk importer yet, so Forever has no button row at all.
+    panel.bulk:SetShown(not readOnly and not A.forever)
 end
 
 function U.Refresh()
@@ -1158,6 +1239,8 @@ local function createSettings()
         W.UpdateSettings({ showSnapshots = not W.GetSettings().showSnapshots })
         U.Refresh()
     end)
+    -- Forever has no data pack to read snapshots from.
+    if A.forever then page.snapshots:Hide() end
 
     text(page, 13, T.muted, pad, 214, contentWidth, 18):SetText("CAPTURE FILTER")
     page.modeButtons = {}
@@ -1377,7 +1460,39 @@ local function artTexture(art, name, fallback, sublevel, width, height, x, y, to
     return texture
 end
 
+-- WoW Forever's Group Finder is the modern style: bottom tabs hidden, pages chosen by side tabs down the right edge
+-- (ListingTab, BrowsingTab, WhoListingTab), and each page draws its own PortraitFrameTemplateNoCloseButton art.
+local function sideTabs()
+    return native and native.WhoListingTab ~= nil and SidePanelTabButtonMixin ~= nil
+end
+
 local function createArt()
+    if sideTabs() then
+        local art = CreateFrame("Frame", nil, native, "PortraitFrameTemplateNoCloseButton")
+        art:SetAllPoints(native)
+        if type(art.SetTitle) == "function" then art:SetTitle(_G.LFG_TITLE or "Looking For Group") end
+        -- The same layers and anchors as LFGWhoListFrame.
+        local function atlas(layer, name, sublevel)
+            local texture = art:CreateTexture(nil, layer, nil, sublevel or 0)
+            if type(texture.SetAtlas) == "function" then texture:SetAtlas(name, true) end
+            return texture
+        end
+        art.background = atlas("BACKGROUND", "groupfinder-background")
+        art.background:SetPoint("TOPLEFT", 4, -80)
+        art.background:SetPoint("BOTTOMRIGHT", -4, 3)
+        art.header = atlas("BACKGROUND", "groupfinder-Stat-StoneBG")
+        art.header:SetPoint("TOPLEFT", 2, -21)
+        art.header:SetPoint("BOTTOMRIGHT", art.background, "TOPRIGHT", 0, -7)
+        art.inside = atlas("BORDER", "common-insideframe")
+        art.inside:SetPoint("TOPLEFT", 3, -78)
+        art.inside:SetPoint("BOTTOMRIGHT", -4, 3)
+        -- Under the column header. There is no button row, so no second line above the bottom edge.
+        art.barTop = atlas("OVERLAY", "groupfinder-ScrollLine")
+        art.barTop:SetPoint("LEFT", art, "TOPLEFT", 4, -(headerTop + headerHeight + 4))
+        art.barTop:SetPoint("RIGHT", art, "TOPRIGHT", -4, -(headerTop + headerHeight + 4))
+        art:Hide()
+        return art
+    end
     local art = CreateFrame("Frame", nil, native)
     art:SetAllPoints(native)
     art.top = artTexture(art, "FrameBackgroundTop", "Interface\\LFGFrame\\UI-LFR-FRAME-MAIN", -1, 512, 121, -1, 0, 0, .236328125)
@@ -1433,7 +1548,7 @@ local function createPanel()
     -- On the spot the native Browse page keeps its own options gear (16 wide, 40 from the right, 44 from the top).
     panel.gearButton = CreateFrame("Button", nil, panel)
     panel.gearButton:SetSize(22, 22)
-    panel.gearButton:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -37, -41)
+    panel.gearButton:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -gearRight, -gearTop)
     panel.gearButton.gear = gear(panel.gearButton, 16, T.muted)
     panel.gearButton.gear:SetPoint("CENTER")
     panel.gearButton:SetScript("OnClick", function() showSettings() end)
@@ -1476,7 +1591,9 @@ local function createPanel()
         menus.raid:Open(list, "TOPLEFT", self, "BOTTOMLEFT", 0, -2)
     end)
     panel.raidButton.tip = { "Raid parses", "Auto follows the raid your group is listed for. Pick a raid to show its parses instead." }
-    panel.viewButton = dropdown(panel, dropdownLeft + raidWidth + dropdownGap, viewWidth, nil, function(self)
+    -- Forever has no raid logs, so there are no parses to pick; the view dropdown takes the first slot.
+    if A.forever then panel.raidButton:Hide() end
+    panel.viewButton = dropdown(panel, A.forever and (frameLeft + rowWidth - viewWidth) or (dropdownLeft + raidWidth + dropdownGap), viewWidth, nil, function(self)
         menus.view:Open({
             { text = "Group by class", checked = grouping == "class", onClick = function() grouping, offset = "class", 0; U.Refresh() end },
             { text = "No grouping", checked = grouping == "none", onClick = function() grouping, offset = "none", 0; U.Refresh() end },
@@ -1604,7 +1721,7 @@ end
 
 local function nativeContent()
     local frames = {}
-    for _, name in ipairs({ "LFGListingFrame", "LFGBrowseFrame" }) do
+    for _, name in ipairs({ "LFGListingFrame", "LFGBrowseFrame", "LFGWhoListFrame" }) do
         local frame = native[name] or _G[name]
         if frame and type(frame.Hide) == "function" then frames[#frames + 1] = frame end
     end
@@ -1613,12 +1730,19 @@ end
 
 local function paintTab(selected)
     if not tab then return end
+    if tab.side then tab:SetChecked(selected); return end
     if tab.fallback then tab:SetSelected(selected); return end
     local call = selected and PanelTemplates_SelectTab or PanelTemplates_DeselectTab
     if type(call) == "function" then pcall(call, tab) end
 end
 
 local function deselectNativeTabs()
+    if sideTabs() then
+        for _, key in ipairs({ "ListingTab", "BrowsingTab", "WhoListingTab" }) do
+            if native[key] then native[key]:SetChecked(false) end
+        end
+        return
+    end
     if type(PanelTemplates_DeselectTab) ~= "function" then return end
     for index = 1, 2 do
         local other = nativeTab(index)
@@ -1651,7 +1775,29 @@ local function deactivate()
     end
 end
 
+local function createSideTab()
+    local button = CreateFrame("Frame", "SoulshardLookupWhispersTab", native, "LargeSideTabButtonTemplate")
+    button.side = true
+    button.tooltipText = "Whispers"
+    -- Matches Blizzard's LFGParentFrameRightTabMixin icon treatment.
+    button.Icon:SetTexture(T.logo)
+    button.Icon:SetSize(30, 30)
+    button.Icon:SetTexCoord(0.03125, 0.96875, 0.03125, 0.96875)
+    button:SetPoint("TOPLEFT", native.WhoListingTab, "BOTTOMLEFT", 0, -2)
+    -- The mixin plays the tab sound on mouse up.
+    button:SetCustomOnMouseUpHandler(function(_, mouse, upInside)
+        if mouse == "LeftButton" and upInside then activate() end
+    end)
+    -- A side tab is a plain Frame with no label; the roster count ("Whispers (3)") goes into its tooltip instead.
+    function button:SetText(value) self.tooltipText = value end
+    function button:Resize() end
+    button:SetChecked(false)
+    A.whisperTab = button
+    return button
+end
+
 local function createTab()
+    if sideTabs() then return createSideTab() end
     local button
     for _, template in ipairs({ "CharacterFrameTabButtonTemplate", "PanelTabButtonTemplate", "TabButtonTemplate" }) do
         local ok, created = pcall(CreateFrame, "Button", "SoulshardLookupWhispersTab", native, template)
@@ -1699,6 +1845,12 @@ local function install()
     end
     for _, frame in ipairs(nativeContent()) do
         if type(frame.HookScript) == "function" then frame:HookScript("OnShow", deactivate) end
+    end
+    -- Blizzard re-checks its own side tab on listing updates; keep Whispers the only checked tab while it is open.
+    if sideTabs() and type(native.UpdateTabs) == "function" then
+        hooksecurefunc(native, "UpdateTabs", function()
+            if active then deselectNativeTabs(); paintTab(true) end
+        end)
     end
     U.Refresh()
 end

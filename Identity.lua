@@ -70,6 +70,7 @@ function A.SearchCharacters(query)
     local region = A.Region()
     local matches = {}
     if A.loading then return matches, realm, "Saved profiles are still loading. Try again in a moment.", 0 end
+    if A.forever then return matches, realm, "Saved profiles are not available for Forever yet. Inspect a nearby player instead.", 0 end
     if not A.data then return matches, realm, "No saved data installed. Install an exported addon release.", 0 end
     if not region then return matches, realm, "This region is not supported by this archive.", 0 end
     local realmKey = A.realmAliases[region .. "/" .. realm]

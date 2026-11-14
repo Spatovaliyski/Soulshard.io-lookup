@@ -214,7 +214,7 @@ function A.CreateSearch(parent)
     end)
     search.input:SetScript("OnEditFocusLost", function(self)
         self:SetBackdropBorderColor(unpack(T.line))
-        if not MouseIsOver(search.dropdown) then search.dropdown:Hide() end
+        if not search.dropdown:IsMouseOver() then search.dropdown:Hide() end
     end)
     search:SetScript("OnHide", function() search.dropdown:Hide(); search.input:ClearFocus() end)
     search:Hide()

@@ -1,6 +1,8 @@
 local _, A = ...
 local layout = A.Theme.tree
-local contentHeight = A.Theme.contentHeight
+local trim = A.Theme.talentTrim
+local contentHeight = A.Theme.contentHeight - trim
+local panelHeight = layout.height - trim
 
 -- Blizzard's talent paintings, one per tree, in catalog order.
 local backgrounds = {
@@ -19,7 +21,7 @@ local backgrounds = {
 -- tiles, so only the 300 x 331 painting is stretched.
 local function treeArt(panel)
     local scaleX = layout.width / 300
-    local scaleY = layout.height / 331
+    local scaleY = panelHeight / 331
     local art = {}
     for _, piece in ipairs({ { "TopLeft", 0, 0, 256, 256, 1, 1 }, { "TopRight", 256, 0, 44, 256, 0.6875, 1 }, { "BottomLeft", 0, 256, 256, 75, 1, 0.5859375 }, { "BottomRight", 256, 256, 44, 75, 0.6875, 0.5859375 } }) do
         local texture = panel:CreateTexture(nil, "BACKGROUND", nil, 1)
@@ -60,7 +62,7 @@ end
 -- Allocated / not-allocated key under the trees, built once.
 local function createLegend(parent, T)
     local legend = CreateFrame("Frame", nil, parent)
-    legend:SetPoint("TOPLEFT", 2, -490)
+    legend:SetPoint("TOPLEFT", 2, trim - 490)
     legend:SetSize(560, 16)
     local function mini(x, allocated)
         T.Fill(legend, x, 1, 14, 14, allocated and T.gold or T.Blend(T.hair, T.background, 0.22), 1, "BORDER")
@@ -79,7 +81,7 @@ local function createLegend(parent, T)
     legend.total = T.Text(legend, 13, T.muted)
     legend.total:SetPoint("LEFT", unallocated, "RIGHT", 8, 0)
     legend.hint = T.Text(parent, 13, T.dim)
-    legend.hint:SetPoint("TOPRIGHT", -2, -490)
+    legend.hint:SetPoint("TOPRIGHT", -2, trim - 490)
     legend.hint:SetJustifyH("RIGHT")
     legend.hint:SetText("Hover a talent for its tooltip.")
     return legend
@@ -95,7 +97,7 @@ function A.RenderTalents(parent, section, character)
     for _, link in ipairs(parent.links) do link:Hide() end
     if not parent.notice then
         parent.notice = T.Button(parent, "Partial record · Hover for details", 280, 22, nil, "tint", 13)
-        parent.notice:SetPoint("TOPRIGHT", 0, -487)
+        parent.notice:SetPoint("TOPRIGHT", 0, trim - 487)
         parent.notice:SetScript("OnEnter", noticeTooltip)
         parent.notice:SetScript("OnLeave", function() GameTooltip:Hide() end)
         parent.message = T.Text(parent, 18, T.muted, true)
@@ -139,7 +141,7 @@ function A.RenderTalents(parent, section, character)
         local accent = T.SpecColor(tree.name)
         local panel = parent.panels[treeIndex]
         if not panel then
-            panel = T.Card(parent, layout.width, layout.height)
+            panel = T.Card(parent, layout.width, panelHeight)
             panel:SetPoint("TOPLEFT", (treeIndex - 1) * layout.pitch, 0)
             panel.accent = T.Fill(panel, 0, 0, layout.width, 3, accent, 1, "ARTWORK")
             -- A card-coloured veil keeps icons and numbers readable: darker behind the header.

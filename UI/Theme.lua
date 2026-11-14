@@ -64,6 +64,8 @@ T.footerY = 685
 T.tabs = { x = 30, pitch = 122, width = 116, top = 719, height = 28, activeTop = 719, activeHeight = 34 }
 T.tabOverhang = 34
 T.tree = { width = 242, height = 484, pitch = 254, tile = 34, columnPitch = 52, rowPitch = 45, x = 26, y = 68 }
+-- Forever trees are 7 rows deep, TBC's 9: its trees, and the window on the Talents tab, lose two rows.
+T.talentTrim = A.forever and 2 * T.tree.rowPitch or 0
 T.quality = { POOR = { 0.55, 0.55, 0.55 }, COMMON = { 0.882, 0.863, 0.906 }, UNCOMMON = { 0.32, 0.82, 0.39 }, RARE = { 0.37, 0.62, 0.95 }, EPIC = { 0.733, 0.510, 0.937 }, LEGENDARY = { 1, 0.58, 0.17 } }
 
 local classColors = {
@@ -307,7 +309,7 @@ function T.Tab(parent, label, x, callback)
         local height = selected and T.tabs.activeHeight or T.tabs.height
         self:SetSize(width, height)
         self:ClearAllPoints()
-        self:SetPoint("TOPLEFT", parent, "TOPLEFT", self.x, -(selected and T.tabs.activeTop or T.tabs.top))
+        self:SetPoint("TOPLEFT", parent, "TOPLEFT", self.x, (parent.trim or 0) - (selected and T.tabs.activeTop or T.tabs.top))
         self.body:ClearAllPoints()
         self.body:SetPoint("TOPLEFT")
         self.body:SetSize(width, height - radius)

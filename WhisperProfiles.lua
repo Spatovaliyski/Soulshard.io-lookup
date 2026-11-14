@@ -70,8 +70,8 @@ function A.ResolveWhisperIdentity(rawName, guid)
     local resolved
     if text(realm, 128) and A.LookupIdentity then resolved = A.LookupIdentity(name, realm) end
     local identity = {
-        environment = "tbc-anniversary",
-        game = "classic-anni",
+        environment = A.whisperIdentity.environment,
+        game = A.whisperIdentity.game,
         region = A.Region and A.Region() or nil,
         name = name,
         realmName = realm,
@@ -239,6 +239,7 @@ local function exportIdentity(record)
     local identity = record.identity
     if type(identity) ~= "table" then return nil, "Identity unavailable" end
     if identity.resolution ~= "exact" then return nil, identity.resolution == "conflicting" and "Identity evidence conflicts" or "Identity unresolved" end
+    if identity.game == "forever" then return nil, "Bulk inspection is not available for Forever yet" end
     if identity.environment ~= "tbc-anniversary" or identity.game ~= "classic-anni" then return nil, "This game has no supported bulk importer" end
     if identity.region ~= "eu" and identity.region ~= "us" then return nil, "Region unresolved" end
     if not validName(identity.name) then return nil, "Character name invalid" end

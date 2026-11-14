@@ -9,8 +9,22 @@ do
     A.forever = (type(interface) == "number" and interface >= 16000 and interface < 17000)
         or (WOW_PROJECT_CAMELOT ~= nil and WOW_PROJECT_ID == WOW_PROJECT_CAMELOT) or false
 end
+-- The game a collected whisper roster belongs to. Forever rosters never mix with TBC ones in saved variables.
+A.whisperIdentity = A.forever and { environment = "forever", game = "forever" }
+    or { environment = "tbc-anniversary", game = "classic-anni" }
 A.staleAfter = 86400
 A.state = "No saved data installed. Install an exported Data folder and restart WoW."
+
+-- Retail-engine clients (Forever) hand tainted code secret values for restricted units, such as the
+-- world-cursor tooltip unit. Comparing, testing or passing one on raises an error, so callers drop them.
+function A.Secret(...)
+    if type(issecretvalue) ~= "function" then return false end
+    for index = 1, select("#", ...) do
+        local ok, secret = pcall(issecretvalue, (select(index, ...)))
+        if not ok or secret then return true end
+    end
+    return false
+end
 
 function A.Text(value)
     return (tostring(value or ""):gsub("|", "||"))

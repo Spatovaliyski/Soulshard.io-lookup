@@ -187,7 +187,7 @@ local function restore()
     for index = 1, math.min(#collection.rows, LIMIT) do
         local item = collection.rows[index]
         local identity = type(item) == "table" and item.identity
-        if type(identity) == "table" and identity.environment == "tbc-anniversary" and identity.game == "classic-anni" and
+        if type(identity) == "table" and identity.environment == A.whisperIdentity.environment and identity.game == A.whisperIdentity.game and
             (identity.region == "eu" or identity.region == "us") and text(identity.name, 96) and
             (identity.realmName == nil or text(identity.realmName, 120)) and (identity.realmSlug == nil or text(identity.realmSlug, 120)) and
             (identity.guid == nil or text(identity.guid, 128)) and
@@ -222,6 +222,7 @@ local function clientSupported()
     if type(GetBuildInfo) ~= "function" then return false end
     local ok, version, build, buildDate, interface = pcall(GetBuildInfo)
     if not ok or not accessible(version) or not accessible(interface) then return false end
+    if A.forever then return true end
     return type(version) == "string" and version:match("^2%.5%.") ~= nil and interface == 20506
 end
 
@@ -342,7 +343,7 @@ function W.RefreshState(quiet, leadershipChanged)
     local epochChanged = leadershipChanged == true
     if incompatible then changed = setStatus("storage-incompatible", "Paused — saved collection needs a compatible addon")
     elseif not settings.enabled then changed = setStatus("disabled", "Collector disabled")
-    elseif not clientSupported() then changed = setStatus("unsupported-client", "Unavailable — requires TBC Anniversary 20506", "Other clients, including Forever, require a validated adapter.")
+    elseif not clientSupported() then changed = setStatus("unsupported-client", "Unavailable — requires TBC Anniversary 20506 or Forever", "Other clients require a validated adapter.")
     elseif not ownerKey then changed = setStatus("identity-unavailable", "Paused — local character identity unavailable")
     elseif not worldReady then changed = setStatus("listing-state-unavailable", "Paused — changing world")
     else
@@ -739,7 +740,7 @@ function W.Initialize()
     local realm, realmOK = read(GetRealmName)
     local region = read(A.Region)
     if nameOK and realmOK and text(name, 96) and text(realm, 120) and (region == "eu" or region == "us") and clientSupported() then
-        ownerKey = tuple("tbc-anniversary", region, realm, name)
+        ownerKey = tuple(A.whisperIdentity.environment, region, realm, name)
     end
     if saved and ownerKey then
         local loaded = saved.settings[ownerKey]

@@ -93,6 +93,7 @@ end
 
 local function addTooltip(tooltip)
     local _, unit = tooltip:GetUnit()
+    if A.Secret(unit) then return end
     local name, realm = A.PlayerName(unit)
     if not name or tooltip.soulshardAdded then return end
     tooltip.soulshardAdded = true
@@ -142,8 +143,72 @@ local function addTooltip(tooltip)
     end
     tooltip:Show()
 end
+-- WoW Forever's InspectFrame stacks mode tabs down its right edge (InspectFrame.ModeTabs, built from
+-- LargeSideTabButtonTemplate). Soulshard joins the bottom of that column. It is not one of Blizzard's
+-- Tabs entries, so InspectSwitchTabs never sees it; it toggles the live profile docked beside the column.
+local function dockedProfile()
+    local frame = A.profile
+    return frame and frame.inspectDocked and frame:IsShown() and frame or nil
+end
+
+local function layoutInspectTab()
+    local tab, tabs = A.inspectTab, InspectFrame and InspectFrame.ModeTabs
+    if not tab or not tabs then return end
+    local last
+    for _, blizzard in ipairs(tabs.Tabs or {}) do if blizzard:IsShown() then last = blizzard end end
+    tab:ClearAllPoints()
+    if last then tab:SetPoint("TOPLEFT", last, "BOTTOMLEFT") else tab:SetPoint("TOPLEFT", tabs, "TOPLEFT") end
+    tab:SetChecked(dockedProfile() ~= nil)
+end
+
+local function undock()
+    local frame = A.profile
+    if not frame or not frame.inspectDocked then return end
+    frame.inspectDocked = nil
+    if frame:IsShown() then frame:Hide() end
+    frame:RestorePosition()
+    if A.inspectTab then A.inspectTab:SetChecked(false) end
+end
+
+local function toggleInspectTab()
+    if dockedProfile() then undock(); return end
+    local unit = InspectFrame.unit
+    if not unit then A.Print("Nothing to look up: no player is being inspected."); return end
+    A.ShowPlayerProfile(unit)
+    local frame = A.profile
+    if not frame or not frame:IsShown() then return end
+    if not frame.inspectHooked then
+        frame.inspectHooked = true
+        frame:HookScript("OnHide", function() if frame.inspectDocked then undock() end end)
+    end
+    frame.inspectDocked = true
+    frame:ClearAllPoints()
+    frame:SetPoint("TOPLEFT", InspectFrame.ModeTabs, "TOPRIGHT", 2, 30)
+    A.inspectTab:SetChecked(true)
+end
+
+local function installInspectTab()
+    local tabs = InspectFrame.ModeTabs
+    local tab = CreateFrame("Frame", "SoulshardLookupInspectTab", tabs, "LargeSideTabButtonTemplate")
+    tab.tooltipText = "Soulshard Lookup"
+    tab.Icon:SetTexture("Interface\\AddOns\\SoulshardLookup\\Media\\Soulshard.tga")
+    tab:SetFillToInterior(true)
+    tab:SetCustomOnMouseUpHandler(function(_, button, upInside)
+        if button == "LeftButton" and upInside then toggleInspectTab() end
+    end)
+    tab:SetChecked(false)
+    A.inspectTab = tab
+    -- The guild tab shows or hides per inspected player, so the column end moves.
+    hooksecurefunc(InspectFrame, "UpdateTabs", layoutInspectTab)
+    InspectFrame:HookScript("OnShow", layoutInspectTab)
+    -- InspectFrame_Show hides the frame before inspecting someone new, so this also covers a unit change.
+    InspectFrame:HookScript("OnHide", undock)
+    layoutInspectTab()
+end
+
 local function installInspectButton()
-    if not InspectFrame or A.inspectLookup or InCombatLockdown() then return end
+    if not InspectFrame or A.inspectLookup or A.inspectTab or InCombatLockdown() then return end
+    if A.forever and InspectFrame.ModeTabs and SidePanelTabButtonMixin then installInspectTab(); return end
     local button = CreateFrame("Button", nil, InspectFrame, "UIPanelButtonTemplate")
     button:SetSize(108, 22)
     button:SetPoint("TOPRIGHT", -12, -32)
@@ -171,7 +236,8 @@ local function installMenu()
             if not context then return end
             local name, realm
             if context.unit then name, realm = A.PlayerName(context.unit)
-            else name, realm = context.name, context.server end
+            elseif not A.Secret(context.name, context.server) then name, realm = context.name, context.server end
+            if not name then return end
             if not A.LookupURL(name, realm) then return end
             local short, suffix = name:match("^([^-]+)%-(.+)$")
             local identity = A.ResolveName(short or name, displayRealm(suffix or realm or GetRealmName())) or
@@ -199,7 +265,9 @@ function A.RefreshPlayerViews(guid)
     if GameTooltip and GameTooltip.GetUnit and GameTooltip:IsShown() then
         local ignored
         ignored, hovered = GameTooltip:GetUnit()
+        if A.Secret(hovered) then hovered = nil end
         hoveredGuid = hovered and UnitGUID(hovered)
+        if A.Secret(hoveredGuid) then hovered, hoveredGuid = nil, nil end
     end
     if A.profile and A.profile:IsShown() and A.profile.view == "profile" and A.profile.profileIdentity then
         local live = A.profile.liveSnapshot

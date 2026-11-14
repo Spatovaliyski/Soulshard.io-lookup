@@ -101,12 +101,16 @@ local function createProfile()
     -- The title bar and the identity block move the window; the buttons on the right do not.
     dragHandle(0, 0, 0, T.titleHeight, -40)
     dragHandle(0, T.titleHeight, 520, 110)
-    local preferences = ArmoryLookupPreferences
+    -- The saved spot, or the centre. Docking beside Forever's inspect tabs moves the window temporarily.
     local points = { CENTER = true, TOP = true, BOTTOM = true, LEFT = true, RIGHT = true, TOPLEFT = true, TOPRIGHT = true, BOTTOMLEFT = true, BOTTOMRIGHT = true }
-    if type(preferences) == "table" and points[preferences.point] and points[preferences.relativePoint] and type(preferences.x) == "number" and type(preferences.y) == "number" then
-        frame:ClearAllPoints()
-        frame:SetPoint(preferences.point, UIParent, preferences.relativePoint, preferences.x, preferences.y)
+    function frame:RestorePosition()
+        local preferences = ArmoryLookupPreferences
+        self:ClearAllPoints()
+        if type(preferences) == "table" and points[preferences.point] and points[preferences.relativePoint] and type(preferences.x) == "number" and type(preferences.y) == "number" then
+            self:SetPoint(preferences.point, UIParent, preferences.relativePoint, preferences.x, preferences.y)
+        else self:SetPoint("CENTER") end
     end
+    frame:RestorePosition()
 
     -- Everything that belongs to a character profile (not the search view) lives in `chrome`, so
     -- switching views is one Show/Hide. The hanging tabs are children of it and overhang the bottom edge.
@@ -230,7 +234,7 @@ local function createProfile()
     T.Hair(identity, 25, 145, 750, 0.14)
 
     -- Footer: what the visible tab is showing, and which archive it came from.
-    T.Hair(chrome, 25, 677, 750, 0.12)
+    frame.footerHair = T.Hair(chrome, 25, 677, 750, 0.12)
     frame.status = T.Text(chrome, 13, T.muted)
     frame.status:SetPoint("TOPLEFT", 27, -685)
     frame.status:SetSize(560, 18)
@@ -263,10 +267,33 @@ local function createProfile()
     end
     frame.search = A.CreateSearch(frame)
     function frame:Fit()
-        local viewWidth = self.view == "search" and T.search.width or width
-        local viewHeight = self.view == "search" and T.search.height or T.height + T.tabOverhang
-        self:SetSize(viewWidth, self.view == "search" and T.search.height or T.height)
-        self:SetScale(math.min(0.8, UIParent:GetWidth() / (viewWidth + 40), UIParent:GetHeight() / (viewHeight + 40)))
+        local search = self.view == "search"
+        -- Forever's shallower talent trees shorten the window on the Talents tab; footer and tabs follow.
+        local trim = not search and self.selectedSection == "talents" and T.talentTrim or 0
+        local height = T.height - trim
+        local viewWidth = search and T.search.width or width
+        local viewHeight = search and T.search.height or height + T.tabOverhang
+        -- Forever renders with retail UI scaling, so the window gets more than the TBC 0.8 cap.
+        local scale = math.min(A.forever and 1.15 or 0.8, UIParent:GetWidth() / (viewWidth + 40), UIParent:GetHeight() / (viewHeight + 40))
+        -- Switching between trimmed and full tabs keeps the top edge still, whatever the saved anchor.
+        if trim ~= (self.chrome.trim or 0) and self:IsShown() then
+            local point = self:GetPoint(1)
+            local left, top, oldScale = self:GetLeft(), self:GetTop(), self:GetScale()
+            if point and not point:find("^TOP") and left and top then
+                self:ClearAllPoints()
+                self:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", left * oldScale / scale, top * oldScale / scale)
+            end
+        end
+        self.chrome.trim = trim
+        self:SetSize(viewWidth, search and T.search.height or height)
+        self:SetScale(scale)
+        self.chrome:SetHeight(height)
+        self.footerHair:SetPoint("TOPLEFT", 25, trim - 677)
+        self.status:SetPoint("TOPLEFT", 27, trim - T.footerY)
+        self.dataset:SetPoint("TOPRIGHT", -27, trim - T.footerY)
+        local region = self.regions[self.selectedSection]
+        if region then region:SetHeight(T.contentHeight - trim) end
+        for _, tab in pairs(self.tabs) do tab:Paint() end
     end
     function frame:SetProfileShown(shown)
         self.chrome:SetShown(shown)
